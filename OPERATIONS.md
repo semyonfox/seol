@@ -78,10 +78,16 @@ may remain running during this short maintenance window.
 
 ## CI and management scope
 
-Jenkins is intentionally not part of this deployment. The repository's
-`make check`, versioned image build, health checks, and rollback container are
-enough for the present single-owner service. Add CI only when releases become
-frequent enough that the manual checklist is a recurring source of mistakes.
+GitHub Actions runs `go vet`, race-enabled tests, formatting checks, and a
+Docker build for every push and pull request. Jenkins handles production
+deployment from `main`: it repeats those checks, builds a commit-tagged image,
+smoke-tests a disposable candidate, deploys with the existing `seol-data`
+volume, retains the previous container for rollback, and verifies the public
+health endpoint and homepage.
+
+The Jenkins job and its source-controlled pipeline live in the private
+`server-stacks` repository. Branches other than `main` receive CI but are not
+deployed.
 
 There is deliberately no web admin dashboard. The authenticated CLI provides
 the useful management surface without adding sessions, cookies, or another

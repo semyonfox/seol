@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
@@ -204,6 +205,11 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func publisherID(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return fmt.Sprintf("%x", sum[:12])
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

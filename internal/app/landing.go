@@ -11,8 +11,8 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Seol publishes static HTML pages and returns shareable URLs.">
-  <title>Seol — publish an HTML page</title>
+  <meta name="description" content="Seol is a temporary pastebin for static sites and agent-made artifacts. Publish a page and get a shareable link.">
+  <title>Seol — temporary links for static sites</title>
   <style>
     :root { color-scheme: light; --paper:#faf7f2; --ink:#201d19; --muted:#6d655c; --line:#ddd5ca; --panel:#f1ece4; --accent:#b84c20; }
     * { box-sizing:border-box; }
@@ -22,12 +22,17 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
     main { padding:5rem 0 3rem; }
     header { padding-bottom:3.5rem; border-bottom:1px solid var(--line); }
     h1, h2 { letter-spacing:-.035em; line-height:1.1; }
-    h1 { margin:0 0 .75rem; font-size:clamp(2.8rem, 10vw, 5.2rem); }
+    h1 { margin:.25rem 0 .75rem; font-size:clamp(3.4rem, 12vw, 6.6rem); }
     h2 { margin:0 0 1rem; font-size:1.5rem; }
     p { margin:.6rem 0; }
-    .tagline { max-width:34rem; margin:0; font-size:clamp(1.3rem, 4vw, 1.8rem); }
-    .intro { max-width:39rem; margin-top:1.25rem; color:var(--muted); }
-    .instance { display:inline-block; margin-top:1rem; }
+    .eyebrow { margin:0; color:var(--accent); font-size:.78rem; font-weight:750; letter-spacing:.12em; text-transform:uppercase; }
+    .tagline { max-width:38rem; margin:0; font-size:clamp(1.45rem, 4vw, 2rem); line-height:1.35; }
+    .intro { max-width:40rem; margin-top:1.25rem; color:var(--muted); font-size:1.05rem; }
+    .signals { display:flex; flex-wrap:wrap; gap:.55rem; margin:1.5rem 0 0; padding:0; list-style:none; }
+    .signals li { padding:.28rem .65rem; border:1px solid var(--line); border-radius:999px; color:var(--muted); font-size:.82rem; }
+    .hero-actions { display:flex; flex-wrap:wrap; align-items:center; gap:1rem; margin-top:1.75rem; }
+    .button { display:inline-block; padding:.6rem .9rem; border-radius:.35rem; background:var(--ink); color:var(--paper); font-weight:700; text-decoration:none; }
+    .button:hover { text-decoration:none; background:var(--accent); }
     section { padding:3rem 0; border-bottom:1px solid var(--line); }
     a { color:var(--accent); text-decoration-thickness:.08em; text-underline-offset:.18em; }
     a:hover { text-decoration-thickness:.14em; }
@@ -39,19 +44,47 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
     .facts { display:grid; grid-template-columns:repeat(3, 1fr); gap:1.5rem; }
     .facts h3 { margin:0 0 .35rem; font-size:1rem; }
     .facts p { color:var(--muted); font-size:.94rem; }
+    .handoff { display:grid; grid-template-columns:minmax(0, .8fr) minmax(0, 1.2fr); gap:2rem; align-items:start; }
+    .handoff pre { margin:0; }
     .note { color:var(--muted); font-size:.94rem; }
     footer { padding:1.5rem 0 3rem; color:var(--muted); font-size:.9rem; }
-    @media (max-width:38rem) { main { padding-top:3rem; } .facts { grid-template-columns:1fr; gap:.8rem; } section { padding:2.4rem 0; } }
+    @media (max-width:38rem) { main { padding-top:3rem; } .facts, .handoff { grid-template-columns:1fr; gap:.8rem; } section { padding:2.4rem 0; } }
   </style>
 </head>
 <body>
 <main>
   <header>
+    <p class="eyebrow">Temporary static hosting</p>
     <h1>Seol</h1>
-    <p class="tagline">Publish an HTML page. Get a shareable URL.</p>
-    <p class="intro">A small self-hosted service for static reports, dashboards, demos, documentation, and pages made by AI agents. Upload a file, directory, or ZIP from the command line.</p>
-    <a class="instance" href="{{.PublicBaseURL}}">{{.PublicBaseURL}}</a>
+    <p class="tagline">A pastebin for static sites. Publish a page, get a link, share it, and let it disappear.</p>
+    <p class="intro">Seol is the quick handoff between a generated artifact and the person who needs to see it. Give the command to a coding agent—or run it yourself—to share reports, dashboards, diagrams, demos, and docs without setting up a deployment.</p>
+    <ul class="signals" aria-label="Key features">
+      <li>Free &amp; open source</li>
+      <li>No account needed to view</li>
+      <li>Expires automatically</li>
+      <li>Static files only</li>
+    </ul>
+    <div class="hero-actions">
+      <a class="button" href="#quick-start">Publish something</a>
+      <a href="#agent-handoff">Give it to an agent</a>
+    </div>
   </header>
+
+  <section id="agent-handoff" aria-labelledby="agent-handoff-title">
+    <div class="handoff">
+      <div>
+        <h2 id="agent-handoff-title">Give this to your agent</h2>
+        <p>Let it make the artifact, publish it, and come back with a normal link you can open anywhere.</p>
+      </div>
+      <pre><code>Create a static site for the result.
+Publish it with:
+
+  seol publish --quiet DIRECTORY
+
+Return the shareable URL.
+Do not include private data.</code></pre>
+    </div>
+  </section>
 
   <section aria-labelledby="quick-start">
     <h2 id="quick-start">Install and publish</h2>
@@ -71,7 +104,7 @@ seol publish ./report
   <section aria-labelledby="how-it-works">
     <h2 id="how-it-works">How it works</h2>
     <div class="facts">
-      <div><h3>Static only</h3><p>HTML, CSS, JavaScript, images, fonts, JSON, SVG, and WASM are served as files. Uploaded server-side code never runs.</p></div>
+      <div><h3>Passive only</h3><p>HTML, CSS, images, fonts, JSON, and SVG are served as files. JavaScript and uploaded server-side code never run.</p></div>
       <div><h3>Random URLs</h3><p>Each page gets a cryptographically random public link. Publishing uses one configured server token; viewing needs none.</p></div>
       <div><h3>Temporary</h3><p>Pages live for one day by default and at most seven days after their latest update. Expired content is removed automatically.</p></div>
     </div>
@@ -89,15 +122,9 @@ seol delete PAGE_ID</code></pre>
     <p class="note"><code>--quiet</code> prints only the URL for scripts and agents. <code>--json</code> returns machine-readable output.</p>
   </section>
 
-  <section aria-labelledby="agents">
-    <h2 id="agents">For coding agents</h2>
-    <p>Ask Codex to use <code>$skill-installer</code> to install the Seol skill from <a href="https://github.com/semyonfox/seol/tree/main/skills/seol">the repository</a>. Or give any agent this instruction:</p>
-    <pre><code>Create a static website in a temporary directory with index.html at its root.
-Publish it by running:
-
-    seol publish --quiet DIRECTORY
-
-Return the printed URL. Never publish credentials or private data.</code></pre>
+  <section aria-labelledby="agent-setup">
+    <h2 id="agent-setup">Set up Codex once</h2>
+    <p>Ask Codex to use <code>$skill-installer</code> to install the <a href="https://github.com/semyonfox/seol/tree/main/skills/seol">Seol skill</a>. After that, you can simply ask it to publish any static artifact with Seol.</p>
   </section>
 
   <section aria-labelledby="self-host">

@@ -1,0 +1,22 @@
+{
+  "name": "seol",
+  "version": "2.1.0",
+  "description": "Fast launcher for the native Seol static artifact publisher",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/semyonfox/seol.git"
+  },
+  "bin": {
+    "seol": "scripts/seol.js"
+  },
+  "files": [
+    "scripts/seol.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

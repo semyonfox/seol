@@ -51,7 +51,7 @@ func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 	if expiresAt != nil {
 		expiry = expiresAt.UTC().Format(time.RFC3339)
 	}
-	_, err = s.db.Exec(`INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds) VALUES(?,?,'active',?,?,?,?,?,1,?)`, id, title, now, now, expiry, upload.size, upload.files, int64(ttl/time.Second))
+	_, err = s.db.Exec(`INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds,publisher_id) VALUES(?,?,'active',?,?,?,?,?,1,?,?)`, id, title, now, now, expiry, upload.size, upload.files, int64(ttl/time.Second), publisherID(s.cfg.UploadToken))
 	if err != nil {
 		_ = os.RemoveAll(root)
 		writeError(w, 500, "INTERNAL", "Could not record page.")
@@ -167,6 +167,10 @@ func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, defaultTT
 		os.RemoveAll(tmp)
 		return preparedUpload{}, "", nil, 0, uploadError{400, "INDEX_REQUIRED", "Archive must contain index.html at its root."}
 	}
+	if err := validatePassiveHTMLTree(tmp); err != nil {
+		os.RemoveAll(tmp)
+		return preparedUpload{}, "", nil, 0, err
+	}
 	title := cleanTitle(r.FormValue("title"))
 	if title == "" {
 		title = extractHTMLTitle(filepath.Join(tmp, "index.html"))
@@ -241,6 +245,86 @@ func (s *Server) extractZIP(archive *zip.ReadCloser, destination string) (int64,
 		total += size
 	}
 	return total, files, nil
+}
+
+var activeHTMLTags = map[string]bool{
+	"base":     true,
+	"button":   true,
+	"embed":    true,
+	"form":     true,
+	"frame":    true,
+	"frameset": true,
+	"iframe":   true,
+	"input":    true,
+	"object":   true,
+	"script":   true,
+	"select":   true,
+	"textarea": true,
+}
+
+func validatePassiveHTMLTree(root string) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		extension := strings.ToLower(filepath.Ext(entry.Name()))
+		if extension != ".html" && extension != ".htm" {
+			return nil
+		}
+		if reason, err := passiveHTMLViolation(path); err != nil {
+			return err
+		} else if reason != "" {
+			relative, _ := filepath.Rel(root, path)
+			return uploadError{400, "ACTIVE_HTML", fmt.Sprintf("%s contains %s; Seol accepts passive HTML only.", filepath.ToSlash(relative), reason)}
+		}
+		return nil
+	})
+}
+
+func passiveHTMLViolation(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	tokenizer := html.NewTokenizer(file)
+	for {
+		tokenType := tokenizer.Next()
+		if tokenType == html.ErrorToken {
+			if errors.Is(tokenizer.Err(), io.EOF) {
+				return "", nil
+			}
+			return "", tokenizer.Err()
+		}
+		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
+			continue
+		}
+		token := tokenizer.Token()
+		tag := strings.ToLower(token.Data)
+		if activeHTMLTags[tag] {
+			return "<" + tag + ">", nil
+		}
+		metaRefresh := false
+		for _, attribute := range token.Attr {
+			name := strings.ToLower(attribute.Key)
+			value := strings.TrimSpace(strings.ToLower(attribute.Val))
+			if strings.HasPrefix(name, "on") {
+				return name + " event handler", nil
+			}
+			if (name == "href" || name == "src" || name == "xlink:href" || name == "action" || name == "formaction") && strings.HasPrefix(value, "javascript:") {
+				return "a javascript: URL", nil
+			}
+			if tag == "meta" && name == "http-equiv" && value == "refresh" {
+				metaRefresh = true
+			}
+		}
+		if metaRefresh {
+			return "a meta refresh", nil
+		}
+	}
 }
 
 func (s *Server) expiryFromForm(value string, defaultTTL time.Duration) (*time.Time, time.Duration, error) {
