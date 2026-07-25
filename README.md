@@ -95,8 +95,8 @@ downloads the release asset for the current platform once, verifies its SHA-256
 checksum, caches it, and then runs at native speed:
 
 ```bash
-npx seol publish report.html
-bunx seol publish report.html
+npx @semyonfox/seol publish report.html
+bunx @semyonfox/seol publish report.html
 ```
 
 Native releases cover Linux (`x64`, `arm64`, `armv7`), macOS (`x64`, Apple
