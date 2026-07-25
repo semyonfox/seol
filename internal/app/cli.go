@@ -19,6 +19,10 @@ import (
 
 type clientConfig struct{ Server, Token string }
 
+type clientPageState struct {
+	Pages map[string]string `json:"pages"`
+}
+
 var managementHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 func ConfigureCLI(args []string) error {
@@ -32,11 +36,10 @@ func ConfigureCLI(args []string) error {
 	if *server == "" {
 		return errors.New("usage: seol configure [--server URL] [--token TOKEN]")
 	}
-	dir, err := os.UserConfigDir()
+	dir, err := clientConfigDir()
 	if err != nil {
 		return err
 	}
-	dir = filepath.Join(dir, "seol")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
@@ -70,11 +73,11 @@ func loadClientConfig() clientConfig {
 
 func readClientConfigFile() clientConfig {
 	var c clientConfig
-	dir, err := os.UserConfigDir()
+	dir, err := clientConfigDir()
 	if err != nil {
 		return c
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "seol", "config.toml"))
+	data, err := os.ReadFile(filepath.Join(dir, "config.toml"))
 	if err != nil {
 		return c
 	}
@@ -97,6 +100,60 @@ func readClientConfigFile() clientConfig {
 	return c
 }
 
+func clientConfigDir() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "seol"), nil
+}
+
+func sourceStateKey(server, source string) (string, error) {
+	absolute, err := filepath.Abs(source)
+	if err != nil {
+		return "", err
+	}
+	absolute, err = filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(server, "/") + "\n" + filepath.Clean(absolute), nil
+}
+
+func loadClientPageState() clientPageState {
+	state := clientPageState{Pages: make(map[string]string)}
+	dir, err := clientConfigDir()
+	if err != nil {
+		return state
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "pages.json"))
+	if err != nil {
+		return state
+	}
+	if json.Unmarshal(data, &state) != nil || state.Pages == nil {
+		state.Pages = make(map[string]string)
+	}
+	return state
+}
+
+func saveClientPageState(state clientPageState) error {
+	dir, err := clientConfigDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	// This file is convenience state rather than authority. A direct write works
+	// consistently on Windows, where renaming over an existing file does not.
+	return os.WriteFile(filepath.Join(dir, "pages.json"), data, 0o600)
+}
+
 func UploadCLI(args []string) error { return uploadCommand(http.MethodPost, "", args) }
 func ReplaceCLI(args []string) error {
 	if len(args) == 0 {
@@ -115,6 +172,7 @@ func uploadCommand(method, id string, args []string) error {
 	jsonOutput := flags.Bool("json", false, "print JSON")
 	expires := flags.String("expires", "", "expiry such as 7d or never")
 	title := flags.String("title", "", "page title")
+	forceNew := flags.Bool("new", false, "create a new page instead of updating the page remembered for this source")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -125,6 +183,16 @@ func uploadCommand(method, id string, args []string) error {
 		return errors.New("Seol token is not configured")
 	}
 	sourcePath := flags.Arg(0)
+	stateKey, err := sourceStateKey(*server, sourcePath)
+	if err != nil {
+		return err
+	}
+	state := loadClientPageState()
+	if method == http.MethodPost && !*forceNew {
+		if rememberedID := state.Pages[stateKey]; rememberedID != "" {
+			method, id = http.MethodPut, rememberedID
+		}
+	}
 	path, cleanup, err := uploadPath(sourcePath)
 	if err != nil {
 		return err
@@ -169,7 +237,7 @@ func uploadCommand(method, id string, args []string) error {
 	if *token != "" {
 		req.Header.Set("Authorization", "Bearer "+*token)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := managementHTTPClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -186,12 +254,20 @@ func uploadCommand(method, id string, args []string) error {
 	if err = json.Unmarshal(responseBody, &p); err != nil {
 		return err
 	}
+	state.Pages[stateKey] = p.ID
+	if err := saveClientPageState(state); err != nil {
+		return fmt.Errorf("page published but local source state could not be saved: %w", err)
+	}
 	if *jsonOutput {
 		fmt.Println(strings.TrimSpace(string(responseBody)))
 	} else if *quiet {
 		fmt.Println(p.URL)
 	} else {
-		fmt.Printf("Published: %s\nID: %s\nExpires: %s\n", p.URL, p.ID, expiryDisplay(p.ExpiresAt))
+		action := "Published"
+		if method == http.MethodPut {
+			action = "Updated"
+		}
+		fmt.Printf("%s: %s\nID: %s\nExpires: %s\n", action, p.URL, p.ID, expiryDisplay(p.ExpiresAt))
 	}
 	return nil
 }

@@ -3,6 +3,8 @@ package app
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +40,64 @@ func TestClientRequestHasTimeout(t *testing.T) {
 	_, err := clientRequest(http.MethodGet, server.URL, "test-token")
 	if err == nil || !strings.Contains(err.Error(), "Client.Timeout") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestPublishRemembersCanonicalSourceAndUpdates(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("SEOL_TOKEN", "publisher-token")
+
+	server, err := New(Config{
+		DataDir:       t.TempDir(),
+		PublicBaseURL: "https://pages.test",
+		UploadToken:   "publisher-token",
+		MaxUpload:     1 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, server)
+	web := httptest.NewServer(server.httpServer.Handler)
+	defer web.Close()
+	t.Setenv("SEOL_SERVER", web.URL)
+
+	source := filepath.Join(t.TempDir(), "report.html")
+	if err := os.WriteFile(source, []byte("<h1>one</h1>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UploadCLI([]string{"--quiet", source}); err != nil {
+		t.Fatal(err)
+	}
+	state := loadClientPageState()
+	key, err := sourceStateKey(web.URL, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := state.Pages[key]
+	if id == "" {
+		t.Fatal("source page was not remembered")
+	}
+
+	if err := os.WriteFile(source, []byte("<h1>two</h1>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := UploadCLI([]string{"--quiet", source}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := server.getPageRecord(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.ContentVersion != 2 {
+		t.Fatalf("content version = %d, want 2", page.ContentVersion)
+	}
+
+	if err := UploadCLI([]string{"--quiet", "--new", source}); err != nil {
+		t.Fatal(err)
+	}
+	state = loadClientPageState()
+	if state.Pages[key] == id {
+		t.Fatal("--new did not remember a new page")
 	}
 }
 

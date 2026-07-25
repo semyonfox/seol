@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+const artifactCSP = "sandbox; default-src 'none'; script-src 'none'; style-src 'unsafe-inline' 'self'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'none'; form-action 'none'; frame-src 'none'; child-src 'none'; object-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+
 type stats struct {
 	ActivePages   int     `json:"active_pages"`
 	ExpiredPages  int     `json:"expired_pages"`
@@ -159,6 +161,7 @@ func validID(id string) bool {
 }
 
 func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
+	setArtifactHeaders(w)
 	id := r.PathValue("id")
 	if !validID(id) {
 		http.NotFound(w, r)
@@ -217,8 +220,18 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 	}
 	if contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path))); contentType != "" {
 		w.Header().Set("Content-Type", contentType)
+	} else {
+		w.Header().Set("Content-Type", "application/octet-stream")
 	}
 	http.ServeFile(w, r, path)
+}
+
+func setArtifactHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy", artifactCSP)
+	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	w.Header().Set("Permissions-Policy", "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()")
+	w.Header().Set("Referrer-Policy", "no-referrer")
 }
 
 func writeGonePage(w http.ResponseWriter) {

@@ -17,8 +17,11 @@ ID: 4WcJXG7i0Jo8F2K_48VcmQ
 Expires: 2026-07-29T20:00:00Z
 ```
 
-Seol deliberately runs no uploaded server-side code. HTML, CSS, JavaScript,
-images, fonts, JSON, SVG, WASM, and other static assets are served as files.
+Seol deliberately runs no uploaded server-side code or browser JavaScript.
+Self-contained HTML may use inline CSS. CSS, images, fonts, JSON, SVG, and other
+passive static assets can also be served as files. Inline scripts, external
+scripts, modules, event handlers, workers, and JavaScript URLs are blocked by
+the artifact CSP.
 
 ## Why Seol exists
 
@@ -47,7 +50,10 @@ file store.
 - One lightweight Go binary for both server and CLI
 - Standalone HTML, ZIP, and automatic directory uploads
 - 128-bit URL-safe random page identifiers
-- One configured bearer token for publishing and management
+- Accountless publisher token stored only on each configured client
+- Same-source publishing updates the existing URL; `--new` creates another
+- Restrictive CSP blocks JavaScript, networking, forms, framing, navigation,
+  popups, active embeds, and workers
 - SQLite metadata and filesystem content storage
 - Configurable expiry with automatic cleanup
 - Atomic page replacement without changing the URL
@@ -84,6 +90,18 @@ go build -o seol ./cmd/seol
 The configuration is stored with mode `0600` at
 `~/.config/seol/config.toml` on Linux.
 
+You can also run the compiled Go client through npm or Bun. The launcher
+downloads the release asset for the current platform once, verifies its SHA-256
+checksum, caches it, and then runs at native speed:
+
+```bash
+npx seol publish report.html
+bunx seol publish report.html
+```
+
+Native releases cover Linux (`x64`, `arm64`, `armv7`), macOS (`x64`, Apple
+Silicon), Windows (`x64`, `arm64`), and FreeBSD (`x64`, `arm64`).
+
 ## Use
 
 ```bash
@@ -99,6 +117,12 @@ seol publish --json ./report-site
 # Print only the resulting URL (ideal for agents)
 seol publish --quiet ./report-site
 
+# Publish the same canonical source path again to update its existing URL
+seol publish ./report-site
+
+# Deliberately create a separate public URL
+seol publish --new ./report-site
+
 # Manage pages
 seol list
 seol stats
@@ -109,13 +133,21 @@ seol delete PAGE_ID
 ```
 
 Directories and ZIP archives must contain `index.html` at their root. Use
-relative asset URLs such as `assets/chart.js`; root-relative URLs such as
-`/assets/chart.js` refer to the Seol host root and will not work beneath a
+relative asset URLs such as `assets/chart.svg`; root-relative URLs such as
+`/assets/chart.svg` refer to the Seol host root and will not work beneath a
 page URL.
+
+Every `.html` and `.htm` file is parsed before activation. Uploads containing
+scripts, event-handler attributes, `javascript:` URLs, forms and form controls,
+frames, active embeds, `<base>`, or meta refresh are rejected with an
+`ACTIVE_HTML` error. The CSP remains the enforcement boundary in the browser;
+parser validation gives publishers an immediate, useful failure instead of a
+partially working artifact.
 
 Pages expire after one day by default. Supported expiration values include
 `1h`, `1d`, and `7d`; seven days is the maximum. A successful replacement
-refreshes the page from that moment using its selected lifetime.
+refreshes the page from that moment using its selected lifetime. Seol retains
+only the current content; temporary handoff hosting has no version history.
 
 ## AI-agent instruction
 
@@ -152,10 +184,13 @@ SEOL_TRUST_PROXY_HEADERS=true
 docker compose --profile tunnel up --build -d
 ```
 
-Uploaded pages are arbitrary untrusted JavaScript. Prefer a dedicated content
-hostname or registrable domain with no authentication cookies. Seol itself
-uses bearer headers and does not set cookies. Enable trusted proxy headers only
-when the origin is private and every public request reaches it through the
+Uploaded pages are arbitrary untrusted content. Seol applies an opaque-origin
+CSP sandbox and blocks all JavaScript, external network connections, forms,
+framing, workers, popups, and navigation. A separate content domain remains
+useful defence in depth but is not required for the initial script-free model.
+Never place authentication cookies on the content hostname. Seol itself uses
+bearer headers and does not set cookies. Enable trusted proxy headers only when
+the origin is private and every public request reaches it through the
 Cloudflare Tunnel.
 
 ### Live instance
@@ -181,8 +216,11 @@ not available on the zone's plan.
 ## HTTP API
 
 Publishing, statistics, listing, inspecting, replacing, changing expiry, and
-deleting pages require `Authorization: Bearer TOKEN`. Public page viewing does
-not.
+deleting pages require `Authorization: Bearer TOKEN`. This is an accountless
+publisher credential, not a login session. Public page viewing does not require
+credentials. Each page records a non-secret SHA-256-derived publisher
+identifier for operational attribution; the raw token is never stored in the
+database.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
@@ -264,15 +302,17 @@ make docker
 ```
 
 Tests cover authentication, HTML publication, ZIP assets, traversal rejection,
-expiry, statistics, cache validation, atomic replacement, deletion, and
-post-delete access.
+expiry, statistics, CSP containment, same-source updates, cache validation,
+atomic replacement, deletion, and post-delete access. `make cross-build`
+compiles every release target and `make npm-pack` validates the npm package.
 
 ## Scope
 
-Seol v2 is intentionally single-operator. It does not provide registration,
-teams, billing, server-side runtimes, passwords for individual pages, analytics,
-or object storage. SQLite plus local files is the simplest reliable deployment;
-PostgreSQL and R2/S3 become useful only when running multiple server replicas.
+Seol is intentionally accountless and single-publisher. It does not provide
+registration, OAuth, teams, billing, server-side runtimes, version history,
+analytics, or object storage. SQLite plus local files is the simplest reliable
+deployment; PostgreSQL and R2/S3 become useful only when running multiple
+server replicas.
 
 ## License
 

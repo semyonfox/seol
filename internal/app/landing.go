@@ -104,7 +104,7 @@ seol publish ./report
   <section aria-labelledby="how-it-works">
     <h2 id="how-it-works">How it works</h2>
     <div class="facts">
-      <div><h3>Static only</h3><p>HTML, CSS, JavaScript, images, fonts, JSON, SVG, and WASM are served as files. Uploaded server-side code never runs.</p></div>
+      <div><h3>Passive only</h3><p>HTML, CSS, images, fonts, JSON, and SVG are served as files. JavaScript and uploaded server-side code never run.</p></div>
       <div><h3>Random URLs</h3><p>Each page gets a cryptographically random public link. Publishing uses one configured server token; viewing needs none.</p></div>
       <div><h3>Temporary</h3><p>Pages live for one day by default and at most seven days after their latest update. Expired content is removed automatically.</p></div>
     </div>

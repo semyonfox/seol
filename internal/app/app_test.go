@@ -153,6 +153,9 @@ func TestUploadServeListDelete(t *testing.T) {
 	if created.ID == "" || created.URL != "https://pages.example.test/p/"+created.ID+"/" {
 		t.Fatalf("unexpected upload response: %+v", created)
 	}
+	if created.PublisherID != publisherID("test-token") {
+		t.Fatalf("publisher id = %q", created.PublisherID)
+	}
 
 	resp, err = http.Get(web.URL + "/p/" + created.ID + "/")
 	if err != nil {
@@ -160,6 +163,20 @@ func TestUploadServeListDelete(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Robots-Tag") == "" {
 		t.Fatalf("serve response status=%d headers=%v", resp.StatusCode, resp.Header)
+	}
+	csp := resp.Header.Get("Content-Security-Policy")
+	for _, directive := range []string{"sandbox", "script-src 'none'", "connect-src 'none'", "form-action 'none'", "worker-src 'none'", "frame-ancestors 'none'"} {
+		if !strings.Contains(csp, directive) {
+			t.Fatalf("artifact CSP missing %q: %q", directive, csp)
+		}
+	}
+	for _, forbidden := range []string{"allow-scripts", "allow-same-origin"} {
+		if strings.Contains(csp, forbidden) {
+			t.Fatalf("artifact sandbox contains forbidden permission %q: %q", forbidden, csp)
+		}
+	}
+	if strings.Contains(csp, "script-src 'unsafe-inline'") || strings.Contains(csp, "script-src 'self'") {
+		t.Fatalf("artifact CSP must disable all JavaScript: %q", csp)
 	}
 	resp.Body.Close()
 
@@ -300,6 +317,67 @@ func TestRejectsUnsafeZIP(t *testing.T) {
 		t.Fatalf("status=%d body=%s", resp.StatusCode, data)
 	}
 	resp.Body.Close()
+}
+
+func TestRejectsActiveHTML(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 1 << 20, MaxFiles: 10, UploadsPerMinute: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	tests := map[string]string{
+		"script":       `<h1>Report</h1><script>alert(1)</script>`,
+		"event":        `<h1 onclick="alert(1)">Report</h1>`,
+		"javascript":   `<a href=" javascript:alert(1)">click</a>`,
+		"form":         `<form action="/submit"><input name="secret"></form>`,
+		"meta refresh": `<meta http-equiv="refresh" content="0;url=https://example.com">`,
+		"iframe":       `<iframe src="https://example.com"></iframe>`,
+	}
+	for name, document := range tests {
+		t.Run(name, func(t *testing.T) {
+			resp := rawUpload(t, web.URL, "page.html", []byte(document), "")
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+			}
+			var result struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Error.Code != "ACTIVE_HTML" {
+				t.Fatalf("code=%q", result.Error.Code)
+			}
+		})
+	}
+}
+
+func TestRejectsActiveHTMLAnywhereInZIP(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 1 << 20, MaxFiles: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	archive := zipBytes(t, map[string]string{
+		"index.html":         `<h1>Passive index</h1>`,
+		"details/report.htm": `<button>Interactive control</button>`,
+	})
+	resp := rawUpload(t, web.URL, "site.zip", archive, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
 }
 
 func TestExpiredPageReturnsGone(t *testing.T) {

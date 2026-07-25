@@ -2,36 +2,83 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
 
 permissions:
   contents: write
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - {goos: linux, goarch: amd64}
-          - {goos: linux, goarch: arm64}
-          - {goos: darwin, goarch: amd64}
-          - {goos: darwin, goarch: arm64}
-          - {goos: windows, goarch: amd64}
+          - goos: linux
+            goarch: amd64
+            asset_arch: x64
+          - goos: linux
+            goarch: arm64
+            asset_arch: arm64
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+            asset_arch: armv7
+          - goos: darwin
+            goarch: amd64
+            asset_arch: x64
+          - goos: darwin
+            goarch: arm64
+            asset_arch: arm64
+          - goos: windows
+            goarch: amd64
+            asset_arch: x64
+            extension: .exe
+          - goos: windows
+            goarch: arm64
+            asset_arch: arm64
+            extension: .exe
+          - goos: freebsd
+            goarch: amd64
+            asset_arch: x64
+          - goos: freebsd
+            goarch: arm64
+            asset_arch: arm64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.26.x"
-      - name: Build
+          go-version-file: go.mod
+      - name: Build native client
         env:
+          CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "0"
+          GOARM: ${{ matrix.goarm }}
+          ASSET_ARCH: ${{ matrix.asset_arch }}
+          EXTENSION: ${{ matrix.extension }}
         run: |
-          suffix=""
-          if [ "$GOOS" = windows ]; then suffix=".exe"; fi
-          go build -trimpath -ldflags="-s -w -X github.com/semyonfox/seol/internal/app.version=${GITHUB_REF_NAME}" -o "seol-${GOOS}-${GOARCH}${suffix}" ./cmd/seol
+          mkdir -p dist
+          go build -trimpath -ldflags="-s -w -X github.com/semyonfox/seol/internal/app.version=${GITHUB_REF_NAME#v}" \
+            -o "dist/seol_${GOOS}_${ASSET_ARCH}${EXTENSION}" ./cmd/seol
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seol-${{ matrix.goos }}-${{ matrix.asset_arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: seol-*
+          path: dist
+          merge-multiple: true
+      - name: Create checksums
+        run: cd dist && sha256sum seol_* > checksums.txt
       - uses: softprops/action-gh-release@v2
         with:
-          files: seol-*
+          files: dist/*
