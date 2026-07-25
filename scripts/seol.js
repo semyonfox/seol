@@ -29,12 +29,12 @@ function fail(message) {
   process.exit(1);
 }
 
-function get(url) {
+function get(url, client = https) {
   return new Promise((resolve, reject) => {
-    https.get(url, { headers: { "User-Agent": "seol-npm-cli" } }, (response) => {
+    const request = client.get(url, { headers: { "User-Agent": "seol-npm-cli" } }, (response) => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         response.resume();
-        resolve(get(new URL(response.headers.location, url).toString()));
+        resolve(get(new URL(response.headers.location, url).toString(), client));
         return;
       }
       if (response.statusCode !== 200) {
@@ -46,7 +46,9 @@ function get(url) {
       response.on("data", (chunk) => chunks.push(chunk));
       response.on("end", () => resolve(Buffer.concat(chunks)));
       response.on("error", reject);
-    }).on("error", reject);
+    });
+    request.setTimeout(30_000, () => request.destroy(new Error("download timed out")));
+    request.on("error", reject);
   });
 }
 
@@ -98,4 +100,8 @@ async function main() {
   process.exit(result.status === null ? 1 : result.status);
 }
 
-main().catch((error) => fail(error.message));
+if (require.main === module) {
+  main().catch((error) => fail(error.message));
+}
+
+module.exports = { get };

@@ -10,6 +10,9 @@
   "bin": {
     "seol": "scripts/seol.js"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "files": [
     "scripts/seol.js"
   ],
