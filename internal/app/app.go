@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/semyonfox/seol/assets"
 	_ "modernc.org/sqlite"
 )
 
@@ -156,6 +157,8 @@ func New(cfg Config) (*Server, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.landingPage)
+	mux.HandleFunc("GET /logo.svg", serveBrandAsset(assets.LogoSVG))
+	mux.HandleFunc("GET /favicon.svg", serveBrandAsset(assets.IconSVG))
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("POST /api/v1/pages", s.auth(s.limitUploads(s.limitUploadConcurrency(s.createPage))))
 	mux.HandleFunc("GET /api/v1/pages", s.auth(s.listPages))
