@@ -161,15 +161,15 @@ func validID(id string) bool {
 }
 
 func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
-	setArtifactHeaders(w)
+	setArtifactCommonHeaders(w)
 	id := r.PathValue("id")
 	if !validID(id) {
-		http.NotFound(w, r)
+		writeNotFoundPage(w)
 		return
 	}
 	p, err := s.getPageRecord(id)
 	if err != nil {
-		http.NotFound(w, r)
+		writeNotFoundPage(w)
 		return
 	}
 	if p.Status == "deleted" {
@@ -193,21 +193,21 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 		clean = "index.html"
 	}
 	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		http.NotFound(w, r)
+		writeNotFoundPage(w)
 		return
 	}
 	root := filepath.Join(s.cfg.DataDir, "pages", id, fmt.Sprintf("v%d", p.ContentVersion))
 	path := filepath.Join(root, clean)
 	info, err := os.Stat(path)
 	if err != nil {
-		http.NotFound(w, r)
+		writeNotFoundPage(w)
 		return
 	}
 	if info.IsDir() {
 		path = filepath.Join(path, "index.html")
 		info, err = os.Stat(path)
 		if err != nil {
-			http.NotFound(w, r)
+			writeNotFoundPage(w)
 			return
 		}
 	}
@@ -218,24 +218,44 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	if contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path))); contentType != "" {
-		w.Header().Set("Content-Type", contentType)
-	} else {
-		w.Header().Set("Content-Type", "application/octet-stream")
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	if contentType == "" {
+		contentType = "application/octet-stream"
 	}
+	w.Header().Set("Content-Type", contentType)
+	setArtifactContentPolicy(w, contentType)
 	http.ServeFile(w, r, path)
 }
 
-func setArtifactHeaders(w http.ResponseWriter) {
-	w.Header().Set("Content-Security-Policy", artifactCSP)
+func setArtifactCommonHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Permissions-Policy", "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 }
 
+func setArtifactContentPolicy(w http.ResponseWriter, contentType string) {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = contentType
+	}
+	switch mediaType {
+	case "text/html", "application/xhtml+xml", "image/svg+xml":
+		w.Header().Set("Content-Security-Policy", artifactCSP)
+	}
+}
+
+func writeNotFoundPage(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", artifactCSP)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Broken link — Seol</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#faf7f2;color:#201d19;font:18px/1.6 system-ui,sans-serif}main{width:min(34rem,calc(100% - 2rem))}h1{font-size:clamp(2.4rem,8vw,4.5rem);letter-spacing:-.04em;line-height:1;margin:0 0 1rem}p{color:#6d655c}</style><main><h1>This link is broken</h1><p>The requested file does not exist in this Seol page. Check the link or ask the publisher to upload the missing file.</p></main></html>`))
+}
+
 func writeGonePage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", artifactCSP)
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.WriteHeader(http.StatusGone)
 	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Link expired — Seol</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#faf7f2;color:#201d19;font:18px/1.6 system-ui,sans-serif}main{width:min(34rem,calc(100% - 2rem))}h1{font-size:clamp(2.4rem,8vw,4.5rem);letter-spacing:-.04em;line-height:1;margin:0 0 1rem}p{color:#6d655c}</style><main><h1>This link has expired</h1><p>Seol pages are temporary. This page has expired or been removed and is no longer available.</p></main></html>`))
