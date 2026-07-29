@@ -354,6 +354,12 @@ func TestPDFUsesBrowserViewerAndMissingAssetExplainsFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("SVG status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "image/svg+xml" {
+		t.Fatalf("SVG content type=%q", got)
+	}
 	if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "sandbox") {
 		t.Fatalf("SVG must retain artifact CSP: %q", resp.Header.Get("Content-Security-Policy"))
 	}
