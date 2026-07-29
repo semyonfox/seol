@@ -319,6 +319,69 @@ func TestRejectsUnsafeZIP(t *testing.T) {
 	resp.Body.Close()
 }
 
+func TestPDFUsesBrowserViewerAndMissingAssetExplainsFailure(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 2 << 20, MaxFiles: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	archive := zipBytes(t, map[string]string{
+		"index.html":  `<a href="plan.pdf">Read the plan</a>`,
+		"plan.pdf":    "%PDF-1.4\n%%EOF",
+		"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg"></svg>`,
+	})
+	created := uploadTestFile(t, web.URL, "site.zip", archive, "")
+
+	resp, err := http.Get(web.URL + "/p/" + created.ID + "/plan.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PDF status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/pdf" {
+		t.Fatalf("PDF content type=%q", got)
+	}
+	if got := resp.Header.Get("Content-Security-Policy"); got != "" {
+		t.Fatalf("PDF must not inherit the HTML sandbox CSP: %q", got)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(web.URL + "/p/" + created.ID + "/diagram.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("SVG status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "image/svg+xml" {
+		t.Fatalf("SVG content type=%q", got)
+	}
+	if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "sandbox") {
+		t.Fatalf("SVG must retain artifact CSP: %q", resp.Header.Get("Content-Security-Policy"))
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(web.URL + "/p/" + created.ID + "/missing.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing asset status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("missing asset content type=%q", got)
+	}
+	if !bytes.Contains(body, []byte("This link is broken")) {
+		t.Fatalf("missing asset response=%q", body)
+	}
+}
+
 func TestRejectsActiveHTML(t *testing.T) {
 	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 1 << 20, MaxFiles: 10, UploadsPerMinute: 100})
 	if err != nil {
