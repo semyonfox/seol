@@ -22,10 +22,10 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
     main, footer { width:min(44rem, calc(100% - 2rem)); margin-inline:auto; }
     main { padding:5rem 0 3rem; }
     header { padding-bottom:3.5rem; border-bottom:1px solid var(--line); }
-    .brand { display:flex; align-items:center; gap:1rem; margin:.25rem 0 .75rem; }
-    .brand img { width:clamp(4rem, 13vw, 5.75rem); height:auto; flex:none; }
+    .masthead { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; margin-bottom:.25rem; }
+    .site-logo { width:clamp(3.5rem, 9vw, 4.5rem); height:auto; flex:none; }
     h1, h2 { letter-spacing:-.035em; line-height:1.1; }
-    h1 { margin:0; font-size:clamp(3.4rem, 12vw, 6.6rem); }
+    h1 { margin:.25rem 0 .75rem; font-size:clamp(3.4rem, 12vw, 6.6rem); }
     h2 { margin:0 0 1rem; font-size:1.5rem; }
     p { margin:.6rem 0; }
     .eyebrow { margin:0; color:var(--accent); font-size:.78rem; font-weight:750; letter-spacing:.12em; text-transform:uppercase; }
@@ -57,8 +57,8 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
 <body>
 <main>
   <header>
-    <p class="eyebrow">Temporary static hosting</p>
-    <div class="brand"><img src="/logo.svg" alt=""><h1>Seol</h1></div>
+    <div class="masthead"><p class="eyebrow">Temporary static hosting</p><img class="site-logo" src="/logo.svg" alt=""></div>
+    <h1>Seol</h1>
     <p class="tagline">A pastebin for static sites. Publish a page, get a link, share it, and let it disappear.</p>
     <p class="intro">Seol is the quick handoff between a generated artifact and the person who needs to see it. Give the command to a coding agent—or run it yourself—to share reports, dashboards, diagrams, demos, and docs without setting up a deployment.</p>
     <ul class="signals" aria-label="Key features">

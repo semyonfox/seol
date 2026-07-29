@@ -1,5 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <title>seol icon</title>
+  <!-- white field keeps the mark visible against dark browser chrome -->
+  <circle cx="256" cy="256" r="244" fill="#ffffff" stroke="#1b1c22" stroke-width="16"/>
   <!-- favicon-weight variant: heavier strokes, fold flap dropped -->
   <path d="M 75 52 H 345 L 437 148 V 460 H 75 Z"
         fill="none" stroke="#1b1c22" stroke-width="48" stroke-linejoin="round"/>
