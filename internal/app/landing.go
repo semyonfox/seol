@@ -12,6 +12,7 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Seol is a temporary pastebin for static sites and agent-made artifacts. Publish a page and get a shareable link.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <title>Seol — temporary links for static sites</title>
   <style>
     :root { color-scheme: light; --paper:#faf7f2; --ink:#201d19; --muted:#6d655c; --line:#ddd5ca; --panel:#f1ece4; --accent:#b84c20; }
@@ -21,8 +22,10 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
     main, footer { width:min(44rem, calc(100% - 2rem)); margin-inline:auto; }
     main { padding:5rem 0 3rem; }
     header { padding-bottom:3.5rem; border-bottom:1px solid var(--line); }
+    .brand { display:flex; align-items:center; gap:1rem; margin:.25rem 0 .75rem; }
+    .brand img { width:clamp(4rem, 13vw, 5.75rem); height:auto; flex:none; }
     h1, h2 { letter-spacing:-.035em; line-height:1.1; }
-    h1 { margin:.25rem 0 .75rem; font-size:clamp(3.4rem, 12vw, 6.6rem); }
+    h1 { margin:0; font-size:clamp(3.4rem, 12vw, 6.6rem); }
     h2 { margin:0 0 1rem; font-size:1.5rem; }
     p { margin:.6rem 0; }
     .eyebrow { margin:0; color:var(--accent); font-size:.78rem; font-weight:750; letter-spacing:.12em; text-transform:uppercase; }
@@ -55,7 +58,7 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
 <main>
   <header>
     <p class="eyebrow">Temporary static hosting</p>
-    <h1>Seol</h1>
+    <div class="brand"><img src="/logo.svg" alt=""><h1>Seol</h1></div>
     <p class="tagline">A pastebin for static sites. Publish a page, get a link, share it, and let it disappear.</p>
     <p class="intro">Seol is the quick handoff between a generated artifact and the person who needs to see it. Give the command to a coding agent—or run it yourself—to share reports, dashboards, diagrams, demos, and docs without setting up a deployment.</p>
     <ul class="signals" aria-label="Key features">
@@ -151,4 +154,12 @@ func (s *Server) landingPage(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = page.WriteTo(w)
+}
+
+func serveBrandAsset(data []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		_, _ = w.Write(data)
+	}
 }
