@@ -44,14 +44,20 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
     code { font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; }
     :not(pre) > code { padding:.1em .3em; border-radius:.2rem; background:var(--panel); font-size:.9em; }
     .result { color:var(--accent); }
+    .start-intro { max-width:38rem; color:var(--muted); }
+    .routes { display:grid; grid-template-columns:1fr 1fr; margin-top:1.5rem; border:1px solid var(--line); border-radius:.45rem; background:var(--panel); overflow:hidden; }
+    .route { min-width:0; padding:1.35rem; }
+    .route + .route { border-left:1px solid var(--line); }
+    .route-label { margin:0 0 .35rem; color:var(--accent); font-size:.72rem; font-weight:750; letter-spacing:.1em; text-transform:uppercase; }
+    .route h3 { margin:0 0 .65rem; font-size:1.2rem; line-height:1.25; }
+    .route pre { margin:1rem 0 0; background:var(--paper); }
+    .route .note { margin-top:1rem; }
     .facts { display:grid; grid-template-columns:repeat(3, 1fr); gap:1.5rem; }
     .facts h3 { margin:0 0 .35rem; font-size:1rem; }
     .facts p { color:var(--muted); font-size:.94rem; }
-    .handoff { display:grid; grid-template-columns:minmax(0, .8fr) minmax(0, 1.2fr); gap:2rem; align-items:start; }
-    .handoff pre { margin:0; }
     .note { color:var(--muted); font-size:.94rem; }
     footer { padding:1.5rem 0 3rem; color:var(--muted); font-size:.9rem; }
-    @media (max-width:38rem) { main { padding-top:3rem; } .facts, .handoff { grid-template-columns:1fr; gap:.8rem; } section { padding:2.4rem 0; } }
+    @media (max-width:38rem) { main { padding-top:3rem; } .facts, .routes { grid-template-columns:1fr; } .route + .route { border-left:0; border-top:1px solid var(--line); } section { padding:2.4rem 0; } }
   </style>
 </head>
 <body>
@@ -60,48 +66,57 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
     <div class="masthead"><p class="eyebrow">Temporary static hosting</p><img class="site-logo" src="/logo.svg" alt=""></div>
     <h1>Seol</h1>
     <p class="tagline">A pastebin for static sites. Publish a page, get a link, share it, and let it disappear.</p>
-    <p class="intro">Seol is the quick handoff between a generated artifact and the person who needs to see it. Give the command to a coding agent—or run it yourself—to share reports, dashboards, diagrams, demos, and docs without setting up a deployment.</p>
+    <p class="intro">Turn a report, dashboard, diagram, demo, or set of docs into a temporary public link—without setting up a deployment.</p>
     <ul class="signals" aria-label="Key features">
       <li>Free &amp; open source</li>
-      <li>No account needed to view</li>
-      <li>Expires automatically</li>
+      <li>No viewer account</li>
+      <li>One-day default</li>
       <li>Static files only</li>
     </ul>
     <div class="hero-actions">
-      <a class="button" href="#quick-start">Publish something</a>
-      <a href="#agent-handoff">Give it to an agent</a>
+      <a class="button" href="#start">CLI quick start</a>
+      <a href="#agent-start">Agent instructions</a>
     </div>
   </header>
 
-  <section id="agent-handoff" aria-labelledby="agent-handoff-title">
-    <div class="handoff">
-      <div>
-        <h2 id="agent-handoff-title">Give this to your agent</h2>
-        <p>Let it make the artifact, publish it, and come back with a normal link you can open anywhere.</p>
-      </div>
-      <pre><code>Create a static site for the result.
+  <section id="start" aria-labelledby="start-title">
+    <h2 id="start-title">Publish your first page</h2>
+    <p class="start-intro">Publishing happens from a terminal or coding agent—there is no web upload form. Ask this server's operator for a publisher token; if you <a href="#self-host">self-host</a>, you create it as <code>SEOL_TOKEN</code>. Viewing links needs no token or account.</p>
+    <div class="routes">
+      <div class="route" id="agent-start">
+        <p class="route-label">For coding agents</p>
+        <h3>Hand off the whole job</h3>
+        <p>Give your agent the server, token, and this prompt. It can build the artifact and return the finished link.</p>
+        <pre><code>Create a static site for the result.
+Configure Seol once:
+
+  npx @semyonfox/seol configure \
+    --server {{.PublicBaseURL}} \
+    --token TOKEN
+
 Publish it with:
 
-  seol publish --quiet DIRECTORY
+  npx @semyonfox/seol publish \
+    --quiet DIRECTORY
 
-Return the shareable URL.
-Do not include private data.</code></pre>
-    </div>
-  </section>
+Return the shareable URL only.
+Do not publish private data.</code></pre>
+      </div>
+      <div class="route">
+        <p class="route-label">From your terminal</p>
+        <h3>Publish without installing</h3>
+        <p>NPX downloads the matching Seol binary, verifies it, and caches it for later runs.</p>
+        <pre><code>npx @semyonfox/seol configure \
+  --server {{.PublicBaseURL}} \
+  --token TOKEN
 
-  <section aria-labelledby="quick-start">
-    <h2 id="quick-start">Install and publish</h2>
-    <p>On Linux amd64:</p>
-    <pre><code>mkdir -p ~/.local/bin
-curl -fL https://github.com/semyonfox/seol/releases/latest/download/seol-linux-amd64 \
-  -o ~/.local/bin/seol
-chmod +x ~/.local/bin/seol</code></pre>
-    <p class="note">Other platforms are on <a href="https://github.com/semyonfox/seol/releases/latest">GitHub Releases</a>. With Go installed, use <code>go install github.com/semyonfox/seol/cmd/seol@latest</code>.</p>
-    <pre><code>seol configure --server {{.PublicBaseURL}} --token TOKEN
-seol publish ./report
+npx @semyonfox/seol publish ./report
+
 <span class="result">Published: {{.PublicBaseURL}}/p/…/</span></code></pre>
-    <p>Standalone HTML files work directly. Directories and ZIP archives need an <code>index.html</code> at their root.</p>
-    <p class="note">Uploads are limited to 10 MiB compressed, 50 MiB extracted, and 100 archive entries.</p>
+        <p class="note">Prefer a native binary? Download one from <a href="https://github.com/semyonfox/seol/releases/latest">GitHub Releases</a>.</p>
+      </div>
+    </div>
+    <p class="note">Publish a standalone HTML file, or a directory/ZIP with <code>index.html</code> at its root. Limits: 10 MiB compressed, 50 MiB extracted, 100 files.</p>
   </section>
 
   <section aria-labelledby="how-it-works">
@@ -130,8 +145,8 @@ seol delete PAGE_ID</code></pre>
     <p>Ask Codex to use <code>$skill-installer</code> to install the <a href="https://github.com/semyonfox/seol/tree/main/skills/seol">Seol skill</a>. After that, you can simply ask it to publish any static artifact with Seol.</p>
   </section>
 
-  <section aria-labelledby="self-host">
-    <h2 id="self-host">Run your own</h2>
+  <section id="self-host" aria-labelledby="self-host-title">
+    <h2 id="self-host-title">Run your own</h2>
     <p>Seol is one Go binary with SQLite metadata and filesystem storage. The included Compose setup can run it with an optional Cloudflare Tunnel sidecar.</p>
     <pre><code>git clone https://github.com/semyonfox/seol.git
 cd seol
