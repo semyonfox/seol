@@ -3,10 +3,12 @@
   <!-- white field keeps the mark visible against dark browser chrome -->
   <circle cx="256" cy="256" r="244" fill="#ffffff" stroke="#1b1c22" stroke-width="16"/>
   <!-- favicon-weight variant: heavier strokes, fold flap dropped -->
-  <path d="M 75 52 H 345 L 437 148 V 460 H 75 Z"
-        fill="none" stroke="#1b1c22" stroke-width="48" stroke-linejoin="round"/>
-  <g fill="#1b1c22" stroke="#1b1c22" stroke-width="18" stroke-linejoin="round">
-    <path d="M 358 168.6 L 115.8 264.7 L 202.3 290 L 329.9 176.2 Z"/>
-    <path d="M 358 168.6 L 347.3 195.6 L 219.7 309.4 L 241.5 392.4 Z"/>
+  <g transform="translate(51.2 51.2) scale(.8)">
+    <path d="M 75 52 H 345 L 437 148 V 460 H 75 Z"
+          fill="none" stroke="#1b1c22" stroke-width="48" stroke-linejoin="round"/>
+    <g fill="#1b1c22" stroke="#1b1c22" stroke-width="18" stroke-linejoin="round">
+      <path d="M 358 168.6 L 115.8 264.7 L 202.3 290 L 329.9 176.2 Z"/>
+      <path d="M 358 168.6 L 347.3 195.6 L 219.7 309.4 L 241.5 392.4 Z"/>
+    </g>
   </g>
 </svg>
