@@ -26,7 +26,7 @@ func TestLandingPage(t *testing.T) {
 		t.Fatalf("status = %d", recorder.Code)
 	}
 	body := recorder.Body.String()
-	for _, want := range []string{"pastebin for static sites", "For coding agents", "npx @semyonfox/seol publish", "publisher token", "10 MiB compressed", "one day by default", "https://pages.example.test", "$skill-installer"} {
+	for _, want := range []string{"pastebin for static sites", "For coding agents", "npx @semyonfox/seol publish", "publisher token", "NPX + PostPlan 0.0.4", "0.04s", "10 MiB compressed", "one day by default", "https://pages.example.test", "$skill-installer"} {
 		if !bytes.Contains([]byte(body), []byte(want)) {
 			t.Fatalf("landing page missing %q", want)
 		}
@@ -165,18 +165,21 @@ func TestUploadServeListDelete(t *testing.T) {
 		t.Fatalf("serve response status=%d headers=%v", resp.StatusCode, resp.Header)
 	}
 	csp := resp.Header.Get("Content-Security-Policy")
-	for _, directive := range []string{"sandbox", "script-src 'none'", "connect-src 'none'", "form-action 'none'", "worker-src 'none'", "frame-ancestors 'none'"} {
+	for _, directive := range []string{"sandbox allow-scripts", "script-src 'unsafe-inline'", "connect-src 'none'", "form-action 'none'", "worker-src 'none'", "frame-ancestors 'none'"} {
 		if !strings.Contains(csp, directive) {
 			t.Fatalf("artifact CSP missing %q: %q", directive, csp)
 		}
 	}
-	for _, forbidden := range []string{"allow-scripts", "allow-same-origin"} {
+	for _, forbidden := range []string{"allow-same-origin", "script-src 'self'"} {
 		if strings.Contains(csp, forbidden) {
-			t.Fatalf("artifact sandbox contains forbidden permission %q: %q", forbidden, csp)
+			t.Fatalf("artifact CSP contains forbidden permission %q: %q", forbidden, csp)
 		}
 	}
-	if strings.Contains(csp, "script-src 'unsafe-inline'") || strings.Contains(csp, "script-src 'self'") {
-		t.Fatalf("artifact CSP must disable all JavaScript: %q", csp)
+	permissions := resp.Header.Get("Permissions-Policy")
+	for _, permission := range []string{"clipboard-read=()", "clipboard-write=()", "camera=()", "microphone=()"} {
+		if !strings.Contains(permissions, permission) {
+			t.Fatalf("permissions policy missing %q: %q", permission, permissions)
+		}
 	}
 	resp.Body.Close()
 
@@ -360,7 +363,7 @@ func TestPDFUsesBrowserViewerAndMissingAssetExplainsFailure(t *testing.T) {
 	if got := resp.Header.Get("Content-Type"); got != "image/svg+xml" {
 		t.Fatalf("SVG content type=%q", got)
 	}
-	if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "sandbox") {
+	if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "sandbox allow-scripts") {
 		t.Fatalf("SVG must retain artifact CSP: %q", resp.Header.Get("Content-Security-Policy"))
 	}
 	resp.Body.Close()
@@ -392,12 +395,16 @@ func TestRejectsActiveHTML(t *testing.T) {
 	defer web.Close()
 
 	tests := map[string]string{
-		"script":       `<h1>Report</h1><script>alert(1)</script>`,
-		"event":        `<h1 onclick="alert(1)">Report</h1>`,
-		"javascript":   `<a href=" javascript:alert(1)">click</a>`,
-		"form":         `<form action="/submit"><input name="secret"></form>`,
-		"meta refresh": `<meta http-equiv="refresh" content="0;url=https://example.com">`,
-		"iframe":       `<iframe src="https://example.com"></iframe>`,
+		"external script": `<script src="app.js"></script>`,
+		"SVG script":      `<svg><script href="app.js"></script></svg>`,
+		"module script":   `<script type="module">document.body.textContent = "no"</script>`,
+		"javascript":      `<a href=" javascript:alert(1)">click</a>`,
+		"form":            `<form action="/submit"><button>send</button></form>`,
+		"file input":      `<input type="file">`,
+		"text input":      `<input type="text">`,
+		"textarea":        `<textarea></textarea>`,
+		"meta refresh":    `<meta http-equiv="refresh" content="0;url=https://example.com">`,
+		"iframe":          `<iframe src="https://example.com"></iframe>`,
 	}
 	for name, document := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -422,6 +429,29 @@ func TestRejectsActiveHTML(t *testing.T) {
 	}
 }
 
+func TestAllowsContainedPageInteractions(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://test", UploadToken: "test-token", MaxUpload: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	document := []byte(`<h1 id="result">Ready</h1>
+		<button onclick="document.querySelector('#result').textContent='Done'">Run</button>
+		<select onchange="document.querySelector('#result').textContent=this.value"><option>One</option></select>
+		<input type="checkbox" onchange="document.body.dataset.checked=this.checked">
+		<input type="range" oninput="document.body.dataset.value=this.value">
+		<script>document.body.dataset.loaded = "yes"</script>`)
+	resp := rawUpload(t, web.URL, "page.html", document, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
 func TestRejectsActiveHTMLAnywhereInZIP(t *testing.T) {
 	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 1 << 20, MaxFiles: 10})
 	if err != nil {
@@ -433,7 +463,7 @@ func TestRejectsActiveHTMLAnywhereInZIP(t *testing.T) {
 
 	archive := zipBytes(t, map[string]string{
 		"index.html":         `<h1>Passive index</h1>`,
-		"details/report.htm": `<button>Interactive control</button>`,
+		"details/report.htm": `<script src="external.js"></script>`,
 	})
 	resp := rawUpload(t, web.URL, "site.zip", archive, "")
 	defer resp.Body.Close()

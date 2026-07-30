@@ -17,11 +17,11 @@ ID: 4WcJXG7i0Jo8F2K_48VcmQ
 Expires: 2026-07-29T20:00:00Z
 ```
 
-Seol deliberately runs no uploaded server-side code or browser JavaScript.
-Self-contained HTML may use inline CSS. CSS, images, fonts, JSON, SVG, and other
-passive static assets can also be served as files. Inline scripts, external
-scripts, modules, event handlers, workers, and JavaScript URLs are blocked by
-the artifact CSP.
+Seol deliberately runs no uploaded server-side code. Self-contained HTML may
+use inline CSS and contained inline JavaScript for buttons, filters, charts,
+and other page-local interactions. Scripts run in an opaque-origin sandbox
+without storage, cookies, networking, workers, forms, framing, navigation, or
+programmatic clipboard access. External scripts and modules are blocked.
 
 ## Why Seol exists
 
@@ -52,8 +52,8 @@ file store.
 - 128-bit URL-safe random page identifiers
 - Accountless publisher token stored only on each configured client
 - Same-source publishing updates the existing URL; `--new` creates another
-- Restrictive CSP blocks JavaScript, networking, forms, framing, navigation,
-  popups, active embeds, and workers
+- Opaque-origin CSP contains inline JavaScript and blocks storage, networking,
+  forms, framing, navigation, popups, active embeds, and workers
 - SQLite metadata and filesystem content storage
 - Configurable expiry with automatic cleanup
 - Atomic page replacement without changing the URL
@@ -102,6 +102,26 @@ bunx @semyonfox/seol publish report.html
 Native releases cover Linux (`x64`, `arm64`, `armv7`), macOS (`x64`, Apple
 Silicon), Windows (`x64`, `arm64`), and FreeBSD (`x64`, `arm64`).
 
+## Performance
+
+Measured on Linux x64 against the live Seol and PostPlan services. Cold runs
+used empty package and Seol binary cache directories, although operating-system
+and registry/CDN caches can still affect results. Warm startup is the median of
+five runs. Workflow timings include the upload request.
+
+| Route | Cold startup | Warm startup | New page | Same-file update | Warm peak memory |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Native Seol 2.1.0 | `<0.01s` | `<0.01s` | `0.13s` | `0.11s` | ~15 MiB |
+| BunX + Seol 2.1.0 | `0.93s` | `0.04s` | `0.16s` | `0.15s` | ~50 MiB |
+| NPX + Seol 2.1.0 | `2.23s` | `0.68s` | `0.80s` | `0.78s` | ~123 MiB |
+| NPX + PostPlan 0.0.4 | `3.64s` | `0.71s` | `1.20s` | `1.27s` | ~124 MiB |
+
+Direct installation is fastest and lightest. BunX is the recommended
+zero-install route: after caching, its launcher overhead was effectively lost
+inside normal network latency. NPX remains useful in npm-only environments.
+These are comparative measurements from one machine, not universal performance
+guarantees.
+
 ## Use
 
 ```bash
@@ -137,12 +157,13 @@ relative asset URLs such as `assets/chart.svg`; root-relative URLs such as
 `/assets/chart.svg` refer to the Seol host root and will not work beneath a
 page URL.
 
-Every `.html` and `.htm` file is parsed before activation. Uploads containing
-scripts, event-handler attributes, `javascript:` URLs, forms and form controls,
-frames, active embeds, `<base>`, or meta refresh are rejected with an
-`ACTIVE_HTML` error. The CSP remains the enforcement boundary in the browser;
-parser validation gives publishers an immediate, useful failure instead of a
-partially working artifact.
+Every `.html` and `.htm` file is parsed before activation. Inline classic
+scripts, event handlers, buttons, selectors, checkboxes, radio buttons, ranges,
+and color controls are allowed. Uploads containing external or module scripts,
+forms, text areas, text/file inputs, `javascript:` URLs, frames, active embeds,
+`<base>`, or meta refresh are rejected with an `ACTIVE_HTML` error. The CSP
+remains the enforcement boundary in the browser; parser validation gives
+publishers an immediate, useful failure instead of a partly working artifact.
 
 Pages expire after one day by default. Supported expiration values include
 `1h`, `1d`, and `7d`; seven days is the maximum. A successful replacement
@@ -184,10 +205,12 @@ SEOL_TRUST_PROXY_HEADERS=true
 docker compose --profile tunnel up --build -d
 ```
 
-Uploaded pages are arbitrary untrusted content. Seol applies an opaque-origin
-CSP sandbox and blocks all JavaScript, external network connections, forms,
-framing, workers, popups, and navigation. A separate content domain remains
-useful defence in depth but is not required for the initial script-free model.
+Uploaded pages are arbitrary untrusted content. Seol permits inline JavaScript
+inside an opaque-origin CSP sandbox while blocking storage, cookies, external
+network connections, external scripts, forms, framing, workers, popups,
+navigation, and programmatic clipboard access. Normal text selection and the
+browser's copy command still work. A separate content domain remains useful
+defence in depth but is not required for this contained-interaction model.
 Never place authentication cookies on the content hostname. Seol itself uses
 bearer headers and does not set cookies. Enable trusted proxy headers only when
 the origin is private and every public request reaches it through the

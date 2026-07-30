@@ -249,17 +249,21 @@ func (s *Server) extractZIP(archive *zip.ReadCloser, destination string) (int64,
 
 var activeHTMLTags = map[string]bool{
 	"base":     true,
-	"button":   true,
 	"embed":    true,
 	"form":     true,
 	"frame":    true,
 	"frameset": true,
 	"iframe":   true,
-	"input":    true,
 	"object":   true,
-	"script":   true,
-	"select":   true,
 	"textarea": true,
+}
+
+var allowedInputTypes = map[string]bool{
+	"button":   true,
+	"checkbox": true,
+	"color":    true,
+	"radio":    true,
+	"range":    true,
 }
 
 func validatePassiveHTMLTree(root string) error {
@@ -278,7 +282,7 @@ func validatePassiveHTMLTree(root string) error {
 			return err
 		} else if reason != "" {
 			relative, _ := filepath.Rel(root, path)
-			return uploadError{400, "ACTIVE_HTML", fmt.Sprintf("%s contains %s; Seol accepts passive HTML only.", filepath.ToSlash(relative), reason)}
+			return uploadError{400, "ACTIVE_HTML", fmt.Sprintf("%s contains %s; Seol accepts contained HTML only.", filepath.ToSlash(relative), reason)}
 		}
 		return nil
 	})
@@ -308,14 +312,26 @@ func passiveHTMLViolation(path string) (string, error) {
 			return "<" + tag + ">", nil
 		}
 		metaRefresh := false
+		inputType := ""
+		scriptType := ""
+		externalScript := false
 		for _, attribute := range token.Attr {
 			name := strings.ToLower(attribute.Key)
 			value := strings.TrimSpace(strings.ToLower(attribute.Val))
-			if strings.HasPrefix(name, "on") {
-				return name + " event handler", nil
+			if tag == "input" && name == "type" {
+				inputType = value
+			}
+			if tag == "script" && name == "type" {
+				scriptType = value
+			}
+			if tag == "script" && (name == "src" || name == "href" || name == "xlink:href") {
+				externalScript = true
 			}
 			if (name == "href" || name == "src" || name == "xlink:href" || name == "action" || name == "formaction") && strings.HasPrefix(value, "javascript:") {
 				return "a javascript: URL", nil
+			}
+			if name == "action" || name == "formaction" {
+				return name + " submission target", nil
 			}
 			if tag == "meta" && name == "http-equiv" && value == "refresh" {
 				metaRefresh = true
@@ -323,6 +339,20 @@ func passiveHTMLViolation(path string) (string, error) {
 		}
 		if metaRefresh {
 			return "a meta refresh", nil
+		}
+		if tag == "input" && !allowedInputTypes[inputType] {
+			if inputType == "" {
+				inputType = "text"
+			}
+			return fmt.Sprintf("<input type=%q>", inputType), nil
+		}
+		if tag == "script" {
+			if externalScript {
+				return "an external <script src>", nil
+			}
+			if scriptType != "" && scriptType != "text/javascript" && scriptType != "application/javascript" {
+				return fmt.Sprintf("<script type=%q>", scriptType), nil
+			}
 		}
 	}
 }
