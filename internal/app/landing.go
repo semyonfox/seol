@@ -55,6 +55,10 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
     .facts { display:grid; grid-template-columns:repeat(3, 1fr); gap:1.5rem; }
     .facts h3 { margin:0 0 .35rem; font-size:1rem; }
     .facts p { color:var(--muted); font-size:.94rem; }
+    table { display:block; width:100%; overflow-x:auto; border-collapse:collapse; margin:1rem 0; font-size:.92rem; }
+    th, td { padding:.55rem .65rem; border-bottom:1px solid var(--line); text-align:right; }
+    th:first-child, td:first-child { text-align:left; }
+    th { color:var(--muted); font-size:.78rem; letter-spacing:.04em; text-transform:uppercase; }
     .note { color:var(--muted); font-size:.94rem; }
     footer { padding:1.5rem 0 3rem; color:var(--muted); font-size:.9rem; }
     @media (max-width:38rem) { main { padding-top:3rem; } .facts, .routes { grid-template-columns:1fr; } .route + .route { border-left:0; border-top:1px solid var(--line); } section { padding:2.4rem 0; } }
@@ -119,10 +123,25 @@ npx @semyonfox/seol publish ./report
     <p class="note">Publish a standalone HTML file, or a directory/ZIP with <code>index.html</code> at its root. Limits: 10 MiB compressed, 50 MiB extracted, 100 files.</p>
   </section>
 
+  <section aria-labelledby="speed">
+    <h2 id="speed">Fast from an agent or terminal</h2>
+    <p>Measured on Linux x64 against the live services. Warm startup is the median of five runs; workflow timings include the network request.</p>
+    <table>
+      <thead><tr><th>Route</th><th>Cold start</th><th>Warm start</th><th>Publish</th><th>Update</th></tr></thead>
+      <tbody>
+        <tr><td>Native Seol</td><td>&lt;0.01s</td><td>&lt;0.01s</td><td>0.13s</td><td>0.11s</td></tr>
+        <tr><td>BunX + Seol</td><td>0.93s</td><td>0.04s</td><td>0.16s</td><td>0.15s</td></tr>
+        <tr><td>NPX + Seol</td><td>2.23s</td><td>0.68s</td><td>0.80s</td><td>0.78s</td></tr>
+        <tr><td>NPX + PostPlan 0.0.4</td><td>3.64s</td><td>0.71s</td><td>1.20s</td><td>1.27s</td></tr>
+      </tbody>
+    </table>
+    <p class="note">Cold runs used empty package and Seol binary caches, though operating-system and registry caches can still affect results. Treat these as one-machine measurements, not universal guarantees.</p>
+  </section>
+
   <section aria-labelledby="how-it-works">
     <h2 id="how-it-works">How it works</h2>
     <div class="facts">
-      <div><h3>Passive only</h3><p>HTML, CSS, images, fonts, JSON, and SVG are served as files. JavaScript and uploaded server-side code never run.</p></div>
+      <div><h3>Contained interactions</h3><p>Inline JavaScript can power buttons, filters, and charts inside the page. An opaque-origin sandbox blocks storage, networking, forms, framing, navigation, workers, and external scripts.</p></div>
       <div><h3>Random URLs</h3><p>Each page gets a cryptographically random public link. Publishing uses one configured server token; viewing needs none.</p></div>
       <div><h3>Temporary</h3><p>Pages live for one day by default and at most seven days after their latest update. Expired content is removed automatically.</p></div>
     </div>
