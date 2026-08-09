@@ -99,6 +99,34 @@ func TestPublishRemembersCanonicalSourceAndUpdates(t *testing.T) {
 	if state.Pages[key] == id {
 		t.Fatal("--new did not remember a new page")
 	}
+	entry, ok := state.History[key]
+	if !ok {
+		t.Fatal("source metadata was not remembered")
+	}
+	if entry.ID != state.Pages[key] || entry.URL == "" || entry.Source != source || entry.PublishedAt == "" {
+		t.Fatalf("history entry = %+v", entry)
+	}
+	if entry.ExpiresAt == nil {
+		t.Fatal("history entry did not record expiry")
+	}
+}
+
+func TestClientPageStateReadsLegacySourceMappings(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir, err := clientConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "pages.json"), []byte(`{"pages":{"key":"page-id"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := loadClientPageState()
+	if state.Pages["key"] != "page-id" || state.History == nil {
+		t.Fatalf("state = %+v", state)
+	}
 }
 
 func closeTestServer(t *testing.T, server *Server) {

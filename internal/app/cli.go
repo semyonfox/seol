@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +21,20 @@ import (
 type clientConfig struct{ Server, Token string }
 
 type clientPageState struct {
-	Pages map[string]string `json:"pages"`
+	Pages   map[string]string          `json:"pages"`
+	History map[string]clientPageEntry `json:"history"`
+}
+
+// clientPageEntry is local convenience metadata. It deliberately never stores
+// uploaded content, so Seol remains a temporary handoff service.
+type clientPageEntry struct {
+	ID          string  `json:"id"`
+	URL         string  `json:"url"`
+	Server      string  `json:"server"`
+	Source      string  `json:"source"`
+	Title       string  `json:"title,omitempty"`
+	PublishedAt string  `json:"published_at"`
+	ExpiresAt   *string `json:"expires_at,omitempty"`
 }
 
 var managementHTTPClient = &http.Client{Timeout: 30 * time.Second}
@@ -109,6 +123,14 @@ func clientConfigDir() (string, error) {
 }
 
 func sourceStateKey(server, source string) (string, error) {
+	absolute, err := canonicalSourcePath(source)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(server, "/") + "\n" + absolute, nil
+}
+
+func canonicalSourcePath(source string) (string, error) {
 	absolute, err := filepath.Abs(source)
 	if err != nil {
 		return "", err
@@ -117,11 +139,11 @@ func sourceStateKey(server, source string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimRight(server, "/") + "\n" + filepath.Clean(absolute), nil
+	return filepath.Clean(absolute), nil
 }
 
 func loadClientPageState() clientPageState {
-	state := clientPageState{Pages: make(map[string]string)}
+	state := clientPageState{Pages: make(map[string]string), History: make(map[string]clientPageEntry)}
 	dir, err := clientConfigDir()
 	if err != nil {
 		return state
@@ -130,8 +152,14 @@ func loadClientPageState() clientPageState {
 	if err != nil {
 		return state
 	}
-	if json.Unmarshal(data, &state) != nil || state.Pages == nil {
+	if json.Unmarshal(data, &state) != nil {
+		return clientPageState{Pages: make(map[string]string), History: make(map[string]clientPageEntry)}
+	}
+	if state.Pages == nil {
 		state.Pages = make(map[string]string)
+	}
+	if state.History == nil {
+		state.History = make(map[string]clientPageEntry)
 	}
 	return state
 }
@@ -184,6 +212,10 @@ func uploadCommand(method, id string, args []string) error {
 	}
 	sourcePath := flags.Arg(0)
 	stateKey, err := sourceStateKey(*server, sourcePath)
+	if err != nil {
+		return err
+	}
+	sourceLocation, err := canonicalSourcePath(sourcePath)
 	if err != nil {
 		return err
 	}
@@ -255,6 +287,15 @@ func uploadCommand(method, id string, args []string) error {
 		return err
 	}
 	state.Pages[stateKey] = p.ID
+	state.History[stateKey] = clientPageEntry{
+		ID:          p.ID,
+		URL:         p.URL,
+		Server:      strings.TrimRight(*server, "/"),
+		Source:      sourceLocation,
+		Title:       p.Title,
+		PublishedAt: time.Now().UTC().Format(time.RFC3339),
+		ExpiresAt:   p.ExpiresAt,
+	}
 	if err := saveClientPageState(state); err != nil {
 		return fmt.Errorf("page published but local source state could not be saved: %w", err)
 	}
@@ -334,6 +375,38 @@ func uploadPath(path string) (string, func(), error) {
 }
 
 func ListCLI(args []string) error { return metadataCommand("list", "", args) }
+func HistoryCLI(args []string) error {
+	flags := flag.NewFlagSet("history", flag.ContinueOnError)
+	jsonOutput := flags.Bool("json", false, "JSON output")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("usage: seol history [--json]")
+	}
+	state := loadClientPageState()
+	entries := make([]clientPageEntry, 0, len(state.History))
+	for _, entry := range state.History {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].PublishedAt > entries[j].PublishedAt })
+	if *jsonOutput {
+		encoded, err := json.MarshalIndent(entries, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(encoded))
+		return nil
+	}
+	for _, entry := range entries {
+		title := entry.Title
+		if title == "" {
+			title = "-"
+		}
+		fmt.Printf("%-22s  %-10s  %-20s  %s\n  %s\n", entry.ID, expiryDisplay(entry.ExpiresAt), title, entry.URL, entry.Source)
+	}
+	return nil
+}
 func StatsCLI(args []string) error {
 	cfg := loadClientConfig()
 	flags := flag.NewFlagSet("stats", flag.ContinueOnError)
