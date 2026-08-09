@@ -125,6 +125,8 @@ seol publish --new ./report-site
 
 # Manage pages
 seol list
+# See local metadata for pages published from this machine, including source paths
+seol history
 seol stats
 seol info PAGE_ID
 seol replace PAGE_ID ./updated-report
@@ -148,6 +150,9 @@ Pages expire after one day by default. Supported expiration values include
 `1h`, `1d`, and `7d`; seven days is the maximum. A successful replacement
 refreshes the page from that moment using its selected lifetime. Seol retains
 only the current content; temporary handoff hosting has no version history.
+The CLI keeps a local metadata-only publishing history (page URL, ID, expiry,
+and source path) so you can find the original artifact again after its link
+expires. It never copies uploaded content into that history.
 
 ## AI-agent instruction
 

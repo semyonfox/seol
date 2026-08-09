@@ -32,6 +32,9 @@ func run() error {
 	if len(os.Args) > 1 && os.Args[1] == "list" {
 		return app.ListCLI(os.Args[2:])
 	}
+	if len(os.Args) > 1 && os.Args[1] == "history" {
+		return app.HistoryCLI(os.Args[2:])
+	}
 	if len(os.Args) > 1 && os.Args[1] == "stats" {
 		return app.StatsCLI(os.Args[2:])
 	}
@@ -48,7 +51,7 @@ func run() error {
 		return app.ExpiryCLI(os.Args[2:])
 	}
 	if len(os.Args) > 1 && os.Args[1] != "serve" {
-		return fmt.Errorf("usage: seol [serve|configure|publish|list|stats|info|replace|expiry|delete]")
+		return fmt.Errorf("usage: seol [serve|configure|publish|history|list|stats|info|replace|expiry|delete]")
 	}
 
 	cfg, err := app.ConfigFromEnv()
