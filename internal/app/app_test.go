@@ -323,6 +323,49 @@ func TestZIPAssetsReplacementCachingAndExpiry(t *testing.T) {
 	}
 }
 
+func TestArtifactPolicyFollowsContentType(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 2 << 20, MaxFiles: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	archive := zipBytes(t, map[string]string{
+		"index.html":  `<a href="plan.pdf">Read the plan</a>`,
+		"plan.pdf":    "%PDF-1.4\n%%EOF",
+		"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg"></svg>`,
+	})
+	created := uploadTestFile(t, web.URL, "site.zip", archive, "")
+
+	for _, test := range []struct {
+		path          string
+		contentType   string
+		expectsPolicy bool
+	}{
+		{"plan.pdf", "application/pdf", false},
+		{"diagram.svg", "image/svg+xml", true},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			resp, err := http.Get(web.URL + "/p/" + created.ID + "/" + test.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d", resp.StatusCode)
+			}
+			if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, test.contentType) {
+				t.Fatalf("content type = %q, want prefix %q", got, test.contentType)
+			}
+			if got := resp.Header.Get("Content-Security-Policy"); (got != "") != test.expectsPolicy {
+				t.Fatalf("content policy = %q, expects policy = %t", got, test.expectsPolicy)
+			}
+		})
+	}
+}
+
 func TestRejectsUnsafeZIP(t *testing.T) {
 	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 1 << 20, MaxFiles: 10})
 	if err != nil {
