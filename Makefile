@@ -1,4 +1,4 @@
-.PHONY: build test check cross-build npm-pack docker
+.PHONY: build test check format cross-build npm-pack docker
 
 build:
 	go build -trimpath -o seol ./cmd/seol
@@ -7,9 +7,14 @@ test:
 	go test -race ./...
 
 check:
-	gofmt -w cmd internal
+	@unformatted="$$(gofmt -l cmd internal)"; \
+	test -z "$$unformatted" || { echo "Run 'make format' to format:" >&2; echo "$$unformatted" >&2; exit 1; }
 	go vet ./...
 	go test -race ./...
+	npm pack --dry-run
+
+format:
+	gofmt -w cmd internal
 
 cross-build:
 	./scripts/build-all.sh

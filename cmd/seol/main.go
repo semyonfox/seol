@@ -19,39 +19,34 @@ func main() {
 }
 
 func run() error {
-	if len(os.Args) > 1 && os.Args[1] == "version" {
-		fmt.Println(app.Version())
-		return nil
-	}
-	if len(os.Args) > 1 && (os.Args[1] == "publish" || os.Args[1] == "upload") {
-		return app.UploadCLI(os.Args[2:])
-	}
-	if len(os.Args) > 1 && os.Args[1] == "replace" {
-		return app.ReplaceCLI(os.Args[2:])
-	}
-	if len(os.Args) > 1 && os.Args[1] == "list" {
-		return app.ListCLI(os.Args[2:])
-	}
-	if len(os.Args) > 1 && os.Args[1] == "history" {
-		return app.HistoryCLI(os.Args[2:])
-	}
-	if len(os.Args) > 1 && os.Args[1] == "stats" {
-		return app.StatsCLI(os.Args[2:])
-	}
-	if len(os.Args) > 1 && os.Args[1] == "info" {
-		return app.InfoCLI(os.Args[2:])
-	}
-	if len(os.Args) > 1 && os.Args[1] == "configure" {
-		return app.ConfigureCLI(os.Args[2:])
-	}
-	if len(os.Args) > 1 && os.Args[1] == "delete" {
-		return app.DeleteCLI(os.Args[2:])
-	}
-	if len(os.Args) > 1 && os.Args[1] == "expiry" {
-		return app.ExpiryCLI(os.Args[2:])
-	}
-	if len(os.Args) > 1 && os.Args[1] != "serve" {
-		return fmt.Errorf("usage: seol [serve|configure|publish|history|list|stats|info|replace|expiry|delete]")
+	args := os.Args[1:]
+	if len(args) > 0 {
+		switch args[0] {
+		case "version":
+			fmt.Println(app.Version())
+			return nil
+		case "publish", "upload":
+			return app.UploadCLI(args[1:])
+		case "replace":
+			return app.ReplaceCLI(args[1:])
+		case "list":
+			return app.ListCLI(args[1:])
+		case "history":
+			return app.HistoryCLI(args[1:])
+		case "stats":
+			return app.StatsCLI(args[1:])
+		case "info":
+			return app.InfoCLI(args[1:])
+		case "configure":
+			return app.ConfigureCLI(args[1:])
+		case "delete":
+			return app.DeleteCLI(args[1:])
+		case "expiry":
+			return app.ExpiryCLI(args[1:])
+		case "serve":
+		default:
+			return fmt.Errorf("usage: seol [serve|configure|publish|history|list|stats|info|replace|expiry|delete]")
+		}
 	}
 
 	cfg, err := app.ConfigFromEnv()

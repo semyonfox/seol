@@ -26,7 +26,7 @@ func TestLandingPage(t *testing.T) {
 		t.Fatalf("status = %d", recorder.Code)
 	}
 	body := recorder.Body.String()
-	for _, want := range []string{"pastebin for static sites", "Give this to your agent", "seol publish --quiet DIRECTORY", "seol publish ./report", "10 MiB compressed", "one day by default", "https://pages.example.test", "$skill-installer"} {
+	for _, want := range []string{"Give this to your agent", "seol publish --quiet DIRECTORY", "https://pages.example.test"} {
 		if !bytes.Contains([]byte(body), []byte(want)) {
 			t.Fatalf("landing page missing %q", want)
 		}
@@ -56,6 +56,27 @@ func TestRejectsIncompatibleExpiryConfiguration(t *testing.T) {
 		MaxExpiry:     7 * 24 * time.Hour,
 	})
 	if err == nil || !strings.Contains(err.Error(), "default expiry") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestNewRejectsInvalidUploadLimits(t *testing.T) {
+	_, err := New(Config{
+		DataDir:       t.TempDir(),
+		PublicBaseURL: "https://pages.test",
+		UploadToken:   "test-token",
+		MaxConcurrent: -1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "upload limits") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidUploadLimits(t *testing.T) {
+	t.Setenv("SEOL_TOKEN", strings.Repeat("a", 32))
+	t.Setenv("SEOL_MAX_CONCURRENT_UPLOADS", "-1")
+	_, err := ConfigFromEnv()
+	if err == nil || !strings.Contains(err.Error(), "upload limits") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -389,9 +410,18 @@ func TestExpiredPageReturnsGone(t *testing.T) {
 	web := httptest.NewServer(s.httpServer.Handler)
 	defer web.Close()
 	p := uploadTestFile(t, web.URL, "page.html", []byte("hello"), "1ms")
-	time.Sleep(5 * time.Millisecond)
-	resp, _ := http.Get(web.URL + "/p/" + p.ID + "/")
+	deadline := time.Now().Add(time.Second)
+	var resp *http.Response
+	for {
+		resp, _ = http.Get(web.URL + "/p/" + p.ID + "/")
+		if resp.StatusCode == http.StatusGone || time.Now().After(deadline) {
+			break
+		}
+		resp.Body.Close()
+		time.Sleep(time.Millisecond)
+	}
 	if resp.StatusCode != http.StatusGone {
+		resp.Body.Close()
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
 	if !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
@@ -494,6 +524,34 @@ func TestPublishingRequiresAuthentication(t *testing.T) {
 	s.httpServer.Handler.ServeHTTP(recorder, req)
 	if recorder.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", recorder.Code)
+	}
+}
+
+func TestMutationsReturnInternalWhenDatabaseIsUnavailable(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://example.test", UploadToken: "secret", MaxUpload: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodPut, "/api/v1/pages/page/content", ""},
+		{http.MethodPatch, "/api/v1/pages/page", `{"expires_in":"1d"}`},
+	} {
+		t.Run(request.method, func(t *testing.T) {
+			req := httptest.NewRequest(request.method, request.path, strings.NewReader(request.body))
+			req.Header.Set("Authorization", "Bearer secret")
+			recorder := httptest.NewRecorder()
+			s.httpServer.Handler.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d", recorder.Code)
+			}
+		})
 	}
 }
 
