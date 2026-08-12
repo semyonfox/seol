@@ -67,6 +67,10 @@ func (s *Server) listPages(w http.ResponseWriter, r *http.Request) {
 		}
 		pages = append(pages, p)
 	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "Could not list pages.")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"pages": pages})
 }
 
@@ -90,10 +94,14 @@ func (s *Server) deletePage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "INTERNAL", "Could not delete page.")
 		return
 	}
-	count, _ := result.RowsAffected()
+	count, err := result.RowsAffected()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "Could not delete page.")
+		return
+	}
 	if count == 0 {
 		var exists int
-		if s.db.QueryRow(`SELECT 1 FROM pages WHERE id=?`, id).Scan(&exists) != nil {
+		if s.db.QueryRowContext(r.Context(), `SELECT 1 FROM pages WHERE id=?`, id).Scan(&exists) != nil {
 			writeError(w, 404, "NOT_FOUND", "Page not found.")
 			return
 		}
@@ -105,12 +113,16 @@ func (s *Server) deletePage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	current, err := s.getPageRecord(id)
-	if errors.Is(err, sql.ErrNoRows) || current.Status != "active" {
+	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Active page not found.")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "Could not read page.")
+		return
+	}
+	if current.Status != "active" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Active page not found.")
 		return
 	}
 	var request struct {
@@ -132,12 +144,15 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = s.db.ExecContext(r.Context(), `UPDATE pages SET updated_at=?,expires_at=?,ttl_seconds=? WHERE id=? AND status='active'`, now, expiresAt.UTC().Format(time.RFC3339), int64(ttl/time.Second), id)
+	updated, err := s.scanPage(s.db.QueryRowContext(r.Context(), `UPDATE pages SET updated_at=?,expires_at=?,ttl_seconds=? WHERE id=? AND status='active' RETURNING `+pageColumns, now, expiresAt.UTC().Format(time.RFC3339), int64(ttl/time.Second), id))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusConflict, "CONFLICT", "Page changed while updating expiry; retry.")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "Could not update expiry.")
 		return
 	}
-	updated, _ := s.getPageRecord(id)
 	writeJSON(w, http.StatusOK, updated)
 }
 

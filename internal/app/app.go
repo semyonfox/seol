@@ -21,6 +21,17 @@ import (
 
 var version = "dev"
 
+const (
+	defaultMaxUpload        = 10 << 20
+	defaultMaxExtracted     = 50 << 20
+	defaultMaxFiles         = 100
+	defaultUploadsPerMinute = 5
+	defaultMaxConcurrent    = 2
+	defaultExpiry           = 24 * time.Hour
+	defaultMaxExpiry        = 7 * 24 * time.Hour
+	defaultCleanupInterval  = time.Minute
+)
+
 type Config struct {
 	ListenAddr        string
 	DataDir           string
@@ -45,21 +56,21 @@ func ConfigFromEnv() (Config, error) {
 		DataDir:          env("SEOL_DATA_DIR", "./data"),
 		PublicBaseURL:    strings.TrimRight(env("SEOL_PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
 		UploadToken:      os.Getenv("SEOL_TOKEN"),
-		MaxUpload:        envInt64("SEOL_MAX_UPLOAD_BYTES", 10<<20),
-		MaxExtracted:     envInt64("SEOL_MAX_EXTRACTED_BYTES", 50<<20),
-		MaxFiles:         int(envInt64("SEOL_MAX_FILES", 100)),
-		UploadsPerMinute: int(envInt64("SEOL_UPLOADS_PER_MINUTE", 5)),
-		MaxConcurrent:    int(envInt64("SEOL_MAX_CONCURRENT_UPLOADS", 2)),
-		CleanupInterval:  time.Minute,
+		MaxUpload:        envInt64("SEOL_MAX_UPLOAD_BYTES", defaultMaxUpload),
+		MaxExtracted:     envInt64("SEOL_MAX_EXTRACTED_BYTES", defaultMaxExtracted),
+		MaxFiles:         int(envInt64("SEOL_MAX_FILES", defaultMaxFiles)),
+		UploadsPerMinute: int(envInt64("SEOL_UPLOADS_PER_MINUTE", defaultUploadsPerMinute)),
+		MaxConcurrent:    int(envInt64("SEOL_MAX_CONCURRENT_UPLOADS", defaultMaxConcurrent)),
+		CleanupInterval:  defaultCleanupInterval,
 	}
 	var err error
 	if c.TrustProxyHeaders, err = envBool("SEOL_TRUST_PROXY_HEADERS", false); err != nil {
 		return Config{}, err
 	}
-	if c.DefaultExpiry, err = parseExpiry(env("SEOL_DEFAULT_EXPIRY", "1d")); err != nil {
+	if c.DefaultExpiry, err = parseExpiry(env("SEOL_DEFAULT_EXPIRY", formatExpiry(defaultExpiry))); err != nil {
 		return Config{}, fmt.Errorf("SEOL_DEFAULT_EXPIRY: %w", err)
 	}
-	if c.MaxExpiry, err = parseExpiry(env("SEOL_MAX_EXPIRY", "7d")); err != nil {
+	if c.MaxExpiry, err = parseExpiry(env("SEOL_MAX_EXPIRY", formatExpiry(defaultMaxExpiry))); err != nil {
 		return Config{}, fmt.Errorf("SEOL_MAX_EXPIRY: %w", err)
 	}
 	if c.UploadToken == "" {
@@ -68,8 +79,8 @@ func ConfigFromEnv() (Config, error) {
 	if len(c.UploadToken) < 32 {
 		return Config{}, errors.New("SEOL_TOKEN must be at least 32 characters")
 	}
-	if c.MaxUpload <= 0 || c.MaxExtracted <= 0 || c.MaxFiles <= 0 || c.UploadsPerMinute <= 0 || c.MaxConcurrent <= 0 {
-		return Config{}, errors.New("upload limits must be positive")
+	if err := validateUploadLimits(c); err != nil {
+		return Config{}, err
 	}
 	return c, nil
 }
@@ -114,32 +125,9 @@ type Server struct {
 }
 
 func New(cfg Config) (*Server, error) {
-	if cfg.MaxUpload == 0 {
-		cfg.MaxUpload = 10 << 20
-	}
-	if cfg.MaxExtracted == 0 {
-		cfg.MaxExtracted = 50 << 20
-	}
-	if cfg.MaxFiles == 0 {
-		cfg.MaxFiles = 100
-	}
-	if cfg.UploadsPerMinute == 0 {
-		cfg.UploadsPerMinute = 5
-	}
-	if cfg.MaxConcurrent == 0 {
-		cfg.MaxConcurrent = 2
-	}
-	if cfg.DefaultExpiry == 0 {
-		cfg.DefaultExpiry = 24 * time.Hour
-	}
-	if cfg.MaxExpiry == 0 {
-		cfg.MaxExpiry = 7 * 24 * time.Hour
-	}
-	if cfg.DefaultExpiry <= 0 || cfg.MaxExpiry < 0 || (cfg.MaxExpiry > 0 && cfg.DefaultExpiry > cfg.MaxExpiry) {
-		return nil, errors.New("default expiry must be positive and not exceed maximum expiry")
-	}
-	if cfg.CleanupInterval == 0 {
-		cfg.CleanupInterval = time.Minute
+	cfg = configWithDefaults(cfg)
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "pages"), 0o750); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
@@ -172,6 +160,51 @@ func New(cfg Config) (*Server, error) {
 		MaxHeaderBytes: 1 << 20,
 	}
 	return s, nil
+}
+
+func configWithDefaults(cfg Config) Config {
+	if cfg.MaxUpload == 0 {
+		cfg.MaxUpload = defaultMaxUpload
+	}
+	if cfg.MaxExtracted == 0 {
+		cfg.MaxExtracted = defaultMaxExtracted
+	}
+	if cfg.MaxFiles == 0 {
+		cfg.MaxFiles = defaultMaxFiles
+	}
+	if cfg.UploadsPerMinute == 0 {
+		cfg.UploadsPerMinute = defaultUploadsPerMinute
+	}
+	if cfg.MaxConcurrent == 0 {
+		cfg.MaxConcurrent = defaultMaxConcurrent
+	}
+	if cfg.DefaultExpiry == 0 {
+		cfg.DefaultExpiry = defaultExpiry
+	}
+	if cfg.MaxExpiry == 0 {
+		cfg.MaxExpiry = defaultMaxExpiry
+	}
+	if cfg.CleanupInterval == 0 {
+		cfg.CleanupInterval = defaultCleanupInterval
+	}
+	return cfg
+}
+
+func validateConfig(cfg Config) error {
+	if err := validateUploadLimits(cfg); err != nil {
+		return err
+	}
+	if cfg.DefaultExpiry <= 0 || cfg.MaxExpiry < 0 || (cfg.MaxExpiry > 0 && cfg.DefaultExpiry > cfg.MaxExpiry) {
+		return errors.New("default expiry must be positive and not exceed maximum expiry")
+	}
+	return nil
+}
+
+func validateUploadLimits(cfg Config) error {
+	if cfg.MaxUpload <= 0 || cfg.MaxExtracted <= 0 || cfg.MaxFiles <= 0 || cfg.UploadsPerMinute <= 0 || cfg.MaxConcurrent <= 0 {
+		return errors.New("upload limits must be positive")
+	}
+	return nil
 }
 
 func (s *Server) Close() error { return s.db.Close() }

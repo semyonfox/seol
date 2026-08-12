@@ -9,7 +9,24 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: test -z "$(gofmt -l cmd internal)"
+      - run: npm pack --dry-run
+
   build:
+    needs: validate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

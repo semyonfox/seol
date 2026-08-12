@@ -18,13 +18,16 @@ import (
 )
 
 type preparedUpload struct {
-	dir   string
-	size  int64
-	files int
+	dir       string
+	size      int64
+	files     int
+	title     string
+	expiresAt *time.Time
+	ttl       time.Duration
 }
 
 func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
-	upload, title, expiresAt, ttl, err := s.receiveUpload(w, r, s.cfg.DefaultExpiry)
+	upload, err := s.receiveUpload(w, r, s.cfg.DefaultExpiry)
 	if err != nil {
 		writeUploadError(w, err)
 		return
@@ -48,23 +51,22 @@ func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	var expiry any
-	if expiresAt != nil {
-		expiry = expiresAt.UTC().Format(time.RFC3339)
+	if upload.expiresAt != nil {
+		expiry = upload.expiresAt.UTC().Format(time.RFC3339)
 	}
-	_, err = s.db.Exec(`INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds,publisher_id) VALUES(?,?,'active',?,?,?,?,?,1,?,?)`, id, title, now, now, expiry, upload.size, upload.files, int64(ttl/time.Second), publisherID(s.cfg.UploadToken))
+	p, err := s.scanPage(s.db.QueryRowContext(r.Context(), `INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds,publisher_id) VALUES(?,?,'active',?,?,?,?,?,1,?,?) RETURNING `+pageColumns, id, upload.title, now, now, expiry, upload.size, upload.files, int64(upload.ttl/time.Second), publisherID(s.cfg.UploadToken)))
 	if err != nil {
 		_ = os.RemoveAll(root)
 		writeError(w, 500, "INTERNAL", "Could not record page.")
 		return
 	}
-	p, _ := s.getPageRecord(id)
 	writeJSON(w, http.StatusCreated, p)
 }
 
 func (s *Server) replacePage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	current, err := s.getPageRecord(id)
-	if errors.Is(err, sql.ErrNoRows) || current.Status != "active" {
+	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, 404, "NOT_FOUND", "Active page not found.")
 		return
 	}
@@ -72,8 +74,11 @@ func (s *Server) replacePage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "INTERNAL", "Could not read page.")
 		return
 	}
-	ttl := time.Duration(current.TTLSeconds) * time.Second
-	upload, title, _, requestedTTL, err := s.receiveUpload(w, r, ttl)
+	if current.Status != "active" {
+		writeError(w, 404, "NOT_FOUND", "Active page not found.")
+		return
+	}
+	upload, err := s.receiveUpload(w, r, time.Duration(current.TTLSeconds)*time.Second)
 	if err != nil {
 		writeUploadError(w, err)
 		return
@@ -86,99 +91,93 @@ func (s *Server) replacePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	if requestedTTL > 0 {
-		ttl = requestedTTL
+	expiresAt := time.Now().UTC().Add(upload.ttl).Format(time.RFC3339)
+	if upload.title == "" {
+		upload.title = current.Title
 	}
-	expiresAt := time.Now().UTC().Add(ttl).Format(time.RFC3339)
-	if title == "" {
-		title = current.Title
+	p, err := s.scanPage(s.db.QueryRowContext(r.Context(), `UPDATE pages SET title=?,updated_at=?,expires_at=?,size_bytes=?,file_count=?,content_version=?,ttl_seconds=? WHERE id=? AND content_version=? AND status='active' RETURNING `+pageColumns, upload.title, now, expiresAt, upload.size, upload.files, version, int64(upload.ttl/time.Second), id, current.ContentVersion))
+	if errors.Is(err, sql.ErrNoRows) {
+		_ = os.RemoveAll(final)
+		writeError(w, http.StatusConflict, "CONFLICT", "Page changed during replacement; retry.")
+		return
 	}
-	result, err := s.db.Exec(`UPDATE pages SET title=?,updated_at=?,expires_at=?,size_bytes=?,file_count=?,content_version=?,ttl_seconds=? WHERE id=? AND content_version=? AND status='active'`, title, now, expiresAt, upload.size, upload.files, version, int64(ttl/time.Second), id, current.ContentVersion)
 	if err != nil {
 		_ = os.RemoveAll(final)
 		writeError(w, 500, "INTERNAL", "Could not record replacement.")
 		return
 	}
-	rows, _ := result.RowsAffected()
-	if rows != 1 {
-		_ = os.RemoveAll(final)
-		writeError(w, 409, "CONFLICT", "Page changed during replacement; retry.")
-		return
-	}
 	_ = os.RemoveAll(filepath.Join(s.cfg.DataDir, "pages", id, fmt.Sprintf("v%d", current.ContentVersion)))
-	p, _ := s.getPageRecord(id)
 	writeJSON(w, http.StatusOK, p)
 }
 
-func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, defaultTTL time.Duration) (preparedUpload, string, *time.Time, time.Duration, error) {
+func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, defaultTTL time.Duration) (preparedUpload, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUpload+(2<<20))
 	if err := r.ParseMultipartForm(s.cfg.MaxUpload); err != nil {
-		return preparedUpload{}, "", nil, 0, uploadError{413, "UPLOAD_TOO_LARGE", "Upload exceeds the configured limit."}
+		return preparedUpload{}, uploadError{413, "UPLOAD_TOO_LARGE", "Upload exceeds the configured limit."}
 	}
 	defer r.MultipartForm.RemoveAll()
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		return preparedUpload{}, "", nil, 0, uploadError{400, "FILE_REQUIRED", "An HTML or ZIP file is required."}
+		return preparedUpload{}, uploadError{400, "FILE_REQUIRED", "An HTML or ZIP file is required."}
 	}
 	defer file.Close()
 	expiresAt, ttl, err := s.expiryFromForm(r.FormValue("expires_in"), defaultTTL)
 	if err != nil {
-		return preparedUpload{}, "", nil, 0, uploadError{400, "INVALID_EXPIRY", err.Error()}
+		return preparedUpload{}, uploadError{400, "INVALID_EXPIRY", err.Error()}
 	}
 	tmp, err := os.MkdirTemp(filepath.Join(s.cfg.DataDir, "pages"), ".upload-")
 	if err != nil {
-		return preparedUpload{}, "", nil, 0, err
+		return preparedUpload{}, err
 	}
-	upload := preparedUpload{dir: tmp}
+	upload := preparedUpload{dir: tmp, expiresAt: expiresAt, ttl: ttl}
 	ext := strings.ToLower(filepath.Ext(header.Filename))
 	switch ext {
 	case ".html", ".htm":
 		size, err := copyLimited(filepath.Join(tmp, "index.html"), file, s.cfg.MaxUpload)
 		if err != nil {
 			os.RemoveAll(tmp)
-			return preparedUpload{}, "", nil, 0, err
+			return preparedUpload{}, err
 		}
 		upload.size, upload.files = size, 1
 	case ".zip":
 		archivePath := filepath.Join(tmp, ".upload.zip")
-		size, err := copyLimited(archivePath, file, s.cfg.MaxUpload)
+		_, err := copyLimited(archivePath, file, s.cfg.MaxUpload)
 		if err != nil {
 			os.RemoveAll(tmp)
-			return preparedUpload{}, "", nil, 0, err
+			return preparedUpload{}, err
 		}
 		archive, err := zip.OpenReader(archivePath)
 		if err != nil {
 			os.RemoveAll(tmp)
-			return preparedUpload{}, "", nil, 0, uploadError{400, "INVALID_ARCHIVE", "ZIP archive is invalid."}
+			return preparedUpload{}, uploadError{400, "INVALID_ARCHIVE", "ZIP archive is invalid."}
 		}
 		upload.size, upload.files, err = s.extractZIP(archive, tmp)
 		archive.Close()
 		_ = os.Remove(archivePath)
-		_ = size
 		if err != nil {
 			os.RemoveAll(tmp)
-			return preparedUpload{}, "", nil, 0, err
+			return preparedUpload{}, err
 		}
 	default:
 		os.RemoveAll(tmp)
-		return preparedUpload{}, "", nil, 0, uploadError{400, "UNSUPPORTED_FILE", "Upload a standalone HTML file or ZIP archive."}
+		return preparedUpload{}, uploadError{400, "UNSUPPORTED_FILE", "Upload a standalone HTML file or ZIP archive."}
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "index.html")); err != nil {
 		os.RemoveAll(tmp)
-		return preparedUpload{}, "", nil, 0, uploadError{400, "INDEX_REQUIRED", "Archive must contain index.html at its root."}
+		return preparedUpload{}, uploadError{400, "INDEX_REQUIRED", "Archive must contain index.html at its root."}
 	}
 	if err := validatePassiveHTMLTree(tmp); err != nil {
 		os.RemoveAll(tmp)
-		return preparedUpload{}, "", nil, 0, err
+		return preparedUpload{}, err
 	}
-	title := cleanTitle(r.FormValue("title"))
-	if title == "" {
-		title = extractHTMLTitle(filepath.Join(tmp, "index.html"))
+	upload.title = cleanTitle(r.FormValue("title"))
+	if upload.title == "" {
+		upload.title = extractHTMLTitle(filepath.Join(tmp, "index.html"))
 	}
-	if title == "" {
-		title = cleanTitle(strings.TrimSuffix(filepath.Base(header.Filename), filepath.Ext(header.Filename)))
+	if upload.title == "" {
+		upload.title = cleanTitle(strings.TrimSuffix(filepath.Base(header.Filename), filepath.Ext(header.Filename)))
 	}
-	return upload, title, expiresAt, ttl, nil
+	return upload, nil
 }
 
 func copyLimited(path string, source io.Reader, limit int64) (int64, error) {
