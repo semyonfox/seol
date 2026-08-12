@@ -176,15 +176,15 @@ func validID(id string) bool {
 }
 
 func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
-	setArtifactHeaders(w)
+	setArtifactCommonHeaders(w)
 	id := r.PathValue("id")
 	if !validID(id) {
-		http.NotFound(w, r)
+		writeArtifactNotFound(w, r)
 		return
 	}
 	p, err := s.getPageRecord(id)
 	if err != nil {
-		http.NotFound(w, r)
+		writeArtifactNotFound(w, r)
 		return
 	}
 	if p.Status == "deleted" {
@@ -208,24 +208,29 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 		clean = "index.html"
 	}
 	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		http.NotFound(w, r)
+		writeArtifactNotFound(w, r)
 		return
 	}
 	root := filepath.Join(s.cfg.DataDir, "pages", id, fmt.Sprintf("v%d", p.ContentVersion))
 	path := filepath.Join(root, clean)
 	info, err := os.Stat(path)
 	if err != nil {
-		http.NotFound(w, r)
+		writeArtifactNotFound(w, r)
 		return
 	}
 	if info.IsDir() {
 		path = filepath.Join(path, "index.html")
 		info, err = os.Stat(path)
 		if err != nil {
-			http.NotFound(w, r)
+			writeArtifactNotFound(w, r)
 			return
 		}
 	}
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	setArtifactContentPolicy(w, contentType)
 	etag := fmt.Sprintf(`"v%d-%x-%x"`, p.ContentVersion, info.Size(), info.ModTime().UnixNano())
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "public, no-cache")
@@ -233,23 +238,35 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	if contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path))); contentType != "" {
-		w.Header().Set("Content-Type", contentType)
-	} else {
-		w.Header().Set("Content-Type", "application/octet-stream")
-	}
+	w.Header().Set("Content-Type", contentType)
 	http.ServeFile(w, r, path)
 }
 
-func setArtifactHeaders(w http.ResponseWriter) {
-	w.Header().Set("Content-Security-Policy", artifactCSP)
+func setArtifactCommonHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Permissions-Policy", "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 }
 
+func setArtifactContentPolicy(w http.ResponseWriter, contentType string) {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = contentType
+	}
+	switch mediaType {
+	case "text/html", "application/xhtml+xml", "image/svg+xml":
+		w.Header().Set("Content-Security-Policy", artifactCSP)
+	}
+}
+
+func writeArtifactNotFound(w http.ResponseWriter, r *http.Request) {
+	setArtifactContentPolicy(w, "text/html")
+	http.NotFound(w, r)
+}
+
 func writeGonePage(w http.ResponseWriter) {
+	setArtifactContentPolicy(w, "text/html")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.WriteHeader(http.StatusGone)

@@ -11,6 +11,7 @@ check:
 	test -z "$$unformatted" || { echo "Run 'make format' to format:" >&2; echo "$$unformatted" >&2; exit 1; }
 	go vet ./...
 	go test -race ./...
+	npm test
 	npm pack --dry-run
 
 format:

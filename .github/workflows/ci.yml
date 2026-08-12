@@ -22,5 +22,6 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - run: test -z "$(gofmt -l cmd internal)"
+      - run: npm test
       - run: npm pack --dry-run
       - run: docker build -t seol:test .

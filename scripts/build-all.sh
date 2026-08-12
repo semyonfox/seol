@@ -26,4 +26,9 @@ build windows arm64 arm64 .exe
 build freebsd amd64 x64
 build freebsd arm64 arm64
 
-(cd dist && sha256sum seol_* > checksums.txt)
+(cd dist &&
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum seol_*
+  else
+    shasum -a 256 seol_*
+  fi > checksums.txt)
