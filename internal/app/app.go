@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
@@ -52,18 +51,34 @@ func Version() string { return version }
 
 func ConfigFromEnv() (Config, error) {
 	c := Config{
-		ListenAddr:       env("SEOL_LISTEN_ADDR", ":8080"),
-		DataDir:          env("SEOL_DATA_DIR", "./data"),
-		PublicBaseURL:    strings.TrimRight(env("SEOL_PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
-		UploadToken:      os.Getenv("SEOL_TOKEN"),
-		MaxUpload:        envInt64("SEOL_MAX_UPLOAD_BYTES", defaultMaxUpload),
-		MaxExtracted:     envInt64("SEOL_MAX_EXTRACTED_BYTES", defaultMaxExtracted),
-		MaxFiles:         int(envInt64("SEOL_MAX_FILES", defaultMaxFiles)),
-		UploadsPerMinute: int(envInt64("SEOL_UPLOADS_PER_MINUTE", defaultUploadsPerMinute)),
-		MaxConcurrent:    int(envInt64("SEOL_MAX_CONCURRENT_UPLOADS", defaultMaxConcurrent)),
-		CleanupInterval:  defaultCleanupInterval,
+		ListenAddr:      env("SEOL_LISTEN_ADDR", ":8080"),
+		DataDir:         env("SEOL_DATA_DIR", "./data"),
+		PublicBaseURL:   strings.TrimRight(env("SEOL_PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
+		UploadToken:     os.Getenv("SEOL_TOKEN"),
+		CleanupInterval: defaultCleanupInterval,
 	}
 	var err error
+	if c.MaxUpload, err = envInt64("SEOL_MAX_UPLOAD_BYTES", defaultMaxUpload); err != nil {
+		return Config{}, err
+	}
+	if c.MaxExtracted, err = envInt64("SEOL_MAX_EXTRACTED_BYTES", defaultMaxExtracted); err != nil {
+		return Config{}, err
+	}
+	maxFiles, err := envInt64("SEOL_MAX_FILES", defaultMaxFiles)
+	if err != nil {
+		return Config{}, err
+	}
+	uploadsPerMinute, err := envInt64("SEOL_UPLOADS_PER_MINUTE", defaultUploadsPerMinute)
+	if err != nil {
+		return Config{}, err
+	}
+	maxConcurrent, err := envInt64("SEOL_MAX_CONCURRENT_UPLOADS", defaultMaxConcurrent)
+	if err != nil {
+		return Config{}, err
+	}
+	c.MaxFiles = int(maxFiles)
+	c.UploadsPerMinute = int(uploadsPerMinute)
+	c.MaxConcurrent = int(maxConcurrent)
 	if c.TrustProxyHeaders, err = envBool("SEOL_TRUST_PROXY_HEADERS", false); err != nil {
 		return Config{}, err
 	}
@@ -92,16 +107,16 @@ func env(name, fallback string) string {
 	return fallback
 }
 
-func envInt64(name string, fallback int64) int64 {
+func envInt64(name string, fallback int64) (int64, error) {
 	value := os.Getenv(name)
 	if value == "" {
-		return fallback
+		return fallback, nil
 	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
-		return fallback
+		return 0, fmt.Errorf("%s: use an integer", name)
 	}
-	return parsed
+	return parsed, nil
 }
 
 func envBool(name string, fallback bool) (bool, error) {
@@ -238,11 +253,6 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
-}
-
-func publisherID(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return fmt.Sprintf("%x", sum[:12])
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

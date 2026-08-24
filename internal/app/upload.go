@@ -54,7 +54,7 @@ func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 	if upload.expiresAt != nil {
 		expiry = upload.expiresAt.UTC().Format(time.RFC3339)
 	}
-	p, err := s.scanPage(s.db.QueryRowContext(r.Context(), `INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds,publisher_id) VALUES(?,?,'active',?,?,?,?,?,1,?,?) RETURNING `+pageColumns, id, upload.title, now, now, expiry, upload.size, upload.files, int64(upload.ttl/time.Second), publisherID(s.cfg.UploadToken)))
+	p, err := s.scanPage(s.db.QueryRowContext(r.Context(), `INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds) VALUES(?,?,'active',?,?,?,?,?,1,?) RETURNING `+pageColumns, id, upload.title, now, now, expiry, upload.size, upload.files, int64(upload.ttl/time.Second)))
 	if err != nil {
 		_ = os.RemoveAll(root)
 		writeError(w, 500, "INTERNAL", "Could not record page.")
