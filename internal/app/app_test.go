@@ -4,11 +4,14 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +81,60 @@ func TestConfigFromEnvRejectsInvalidUploadLimits(t *testing.T) {
 	_, err := ConfigFromEnv()
 	if err == nil || !strings.Contains(err.Error(), "upload limits") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestConfigFromEnvRejectsMalformedUploadLimits(t *testing.T) {
+	t.Setenv("SEOL_TOKEN", strings.Repeat("a", 32))
+	t.Setenv("SEOL_MAX_UPLOAD_BYTES", "ten-megabytes")
+	_, err := ConfigFromEnv()
+	if err == nil || !strings.Contains(err.Error(), "SEOL_MAX_UPLOAD_BYTES") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestOpenDatabaseMigratesLegacyPagesSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seol.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE pages (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, size_bytes INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, column := range []string{"title", "status", "updated_at", "expires_at", "file_count", "content_version", "ttl_seconds"} {
+		var name string
+		if err := db.QueryRow(`SELECT name FROM pragma_table_info('pages') WHERE name = ?`, column).Scan(&name); err != nil {
+			t.Fatalf("column %q: %v", column, err)
+		}
+	}
+}
+
+func TestCleanupRetriesDeletedPageFileRemoval(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+	p := uploadTestFile(t, web.URL, "page.html", []byte("<h1>hello</h1>"), "")
+	if _, err := s.db.Exec(`UPDATE pages SET status = 'deleted' WHERE id = ?`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	s.cleanupExpired()
+	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "pages", p.ID)); !os.IsNotExist(err) {
+		t.Fatalf("deleted page files remain: %v", err)
 	}
 }
 
@@ -174,10 +231,6 @@ func TestUploadServeListDelete(t *testing.T) {
 	if created.ID == "" || created.URL != "https://pages.example.test/p/"+created.ID+"/" {
 		t.Fatalf("unexpected upload response: %+v", created)
 	}
-	if created.PublisherID != publisherID("test-token") {
-		t.Fatalf("publisher id = %q", created.PublisherID)
-	}
-
 	resp, err = http.Get(web.URL + "/p/" + created.ID + "/")
 	if err != nil {
 		t.Fatal(err)

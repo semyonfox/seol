@@ -223,9 +223,7 @@ not available on the zone's plan.
 Publishing, statistics, listing, inspecting, replacing, changing expiry, and
 deleting pages require `Authorization: Bearer TOKEN`. This is an accountless
 publisher credential, not a login session. Public page viewing does not require
-credentials. Each page records a non-secret SHA-256-derived publisher
-identifier for operational attribution; the raw token is never stored in the
-database.
+credentials. The raw token is never stored in the database.
 
 | Method | Route | Purpose |
 | --- | --- | --- |

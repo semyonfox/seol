@@ -26,7 +26,7 @@ services:
 
   cloudflared:
     container_name: seol-tunnel
-    image: cloudflare/cloudflared:latest
+    image: cloudflare/cloudflared:2026.8.2
     profiles: ["tunnel"]
     restart: unless-stopped
     command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}

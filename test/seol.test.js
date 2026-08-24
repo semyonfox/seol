@@ -16,7 +16,7 @@ function response(statusCode, headers = {}) {
 function request() {
   const result = new EventEmitter();
   result.setTimeout = () => {};
-  result.destroy = () => {};
+  result.destroy = (error) => process.nextTick(() => result.emit("error", error));
   return result;
 }
 
@@ -62,6 +62,33 @@ test("get follows HTTPS redirects", async () => {
   assert.deepEqual(await get("https://example.test/original", client), Buffer.from("redirected release"));
   assert.deepEqual(urls, ["https://example.test/original", "https://example.test/redirected"]);
   assert.equal(resumed, true);
+});
+
+test("get rejects redirect loops", async () => {
+  const client = {
+    get(_url, _options, callback) {
+      const stream = response(302, { location: "/again" });
+      process.nextTick(() => callback(stream));
+      return request();
+    },
+  };
+
+  await assert.rejects(get("https://example.test/original", client), new Error("download exceeded redirect limit"));
+});
+
+test("get rejects downloads larger than 64 MiB", async () => {
+  const client = {
+    get(_url, _options, callback) {
+      const stream = response(200);
+      process.nextTick(() => {
+        callback(stream);
+        stream.emit("data", Buffer.alloc(64 * 1024 * 1024 + 1));
+      });
+      return request();
+    },
+  };
+
+  await assert.rejects(get("https://example.test/release", client), new Error("download exceeds 64 MiB limit"));
 });
 
 test("get rejects HTTPS request errors", async () => {
