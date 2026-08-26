@@ -193,6 +193,8 @@ func configWithDefaults(cfg Config) Config {
 	if cfg.MaxConcurrent == 0 {
 		cfg.MaxConcurrent = defaultMaxConcurrent
 	}
+	// Zero means "unset" here; expiryUnlimited is the explicit "never" sentinel
+	// and must survive defaulting.
 	if cfg.DefaultExpiry == 0 {
 		cfg.DefaultExpiry = defaultExpiry
 	}
@@ -209,8 +211,20 @@ func validateConfig(cfg Config) error {
 	if err := validateUploadLimits(cfg); err != nil {
 		return err
 	}
-	if cfg.DefaultExpiry <= 0 || cfg.MaxExpiry < 0 || (cfg.MaxExpiry > 0 && cfg.DefaultExpiry > cfg.MaxExpiry) {
-		return errors.New("default expiry must be positive and not exceed maximum expiry")
+	if cfg.MaxExpiry != expiryUnlimited && cfg.MaxExpiry <= 0 {
+		return errors.New("maximum expiry must be positive or never")
+	}
+	if cfg.DefaultExpiry == expiryUnlimited {
+		if cfg.MaxExpiry != expiryUnlimited {
+			return errors.New("default expiry of never requires a maximum expiry of never")
+		}
+		return nil
+	}
+	if cfg.DefaultExpiry <= 0 {
+		return errors.New("default expiry must be positive or never")
+	}
+	if cfg.MaxExpiry != expiryUnlimited && cfg.DefaultExpiry > cfg.MaxExpiry {
+		return errors.New("default expiry must not exceed maximum expiry")
 	}
 	return nil
 }

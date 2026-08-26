@@ -54,7 +54,7 @@ func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 	if upload.expiresAt != nil {
 		expiry = upload.expiresAt.UTC().Format(time.RFC3339)
 	}
-	p, err := s.scanPage(s.db.QueryRowContext(r.Context(), `INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds) VALUES(?,?,'active',?,?,?,?,?,1,?) RETURNING `+pageColumns, id, upload.title, now, now, expiry, upload.size, upload.files, int64(upload.ttl/time.Second)))
+	p, err := s.scanPage(s.db.QueryRowContext(r.Context(), `INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds) VALUES(?,?,'active',?,?,?,?,?,1,?) RETURNING `+pageColumns, id, upload.title, now, now, expiry, upload.size, upload.files, ttlSeconds(upload.ttl)))
 	if err != nil {
 		_ = os.RemoveAll(root)
 		writeError(w, 500, "INTERNAL", "Could not record page.")
@@ -78,7 +78,7 @@ func (s *Server) replacePage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "NOT_FOUND", "Active page not found.")
 		return
 	}
-	upload, err := s.receiveUpload(w, r, time.Duration(current.TTLSeconds)*time.Second)
+	upload, err := s.receiveUpload(w, r, ttlDuration(current.TTLSeconds))
 	if err != nil {
 		writeUploadError(w, err)
 		return
@@ -91,11 +91,14 @@ func (s *Server) replacePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	expiresAt := time.Now().UTC().Add(upload.ttl).Format(time.RFC3339)
+	var expiresAt any
+	if upload.expiresAt != nil {
+		expiresAt = upload.expiresAt.UTC().Format(time.RFC3339)
+	}
 	if upload.title == "" {
 		upload.title = current.Title
 	}
-	p, err := s.scanPage(s.db.QueryRowContext(r.Context(), `UPDATE pages SET title=?,updated_at=?,expires_at=?,size_bytes=?,file_count=?,content_version=?,ttl_seconds=? WHERE id=? AND content_version=? AND status='active' RETURNING `+pageColumns, upload.title, now, expiresAt, upload.size, upload.files, version, int64(upload.ttl/time.Second), id, current.ContentVersion))
+	p, err := s.scanPage(s.db.QueryRowContext(r.Context(), `UPDATE pages SET title=?,updated_at=?,expires_at=?,size_bytes=?,file_count=?,content_version=?,ttl_seconds=? WHERE id=? AND content_version=? AND status='active' RETURNING `+pageColumns, upload.title, now, expiresAt, upload.size, upload.files, version, ttlSeconds(upload.ttl), id, current.ContentVersion))
 	if errors.Is(err, sql.ErrNoRows) {
 		_ = os.RemoveAll(final)
 		writeError(w, http.StatusConflict, "CONFLICT", "Page changed during replacement; retry.")
@@ -331,16 +334,16 @@ func (s *Server) expiryFromForm(value string, defaultTTL time.Duration) (*time.T
 		value = formatExpiry(defaultTTL)
 	}
 	if strings.EqualFold(value, "never") {
-		if s.cfg.MaxExpiry > 0 {
+		if s.cfg.MaxExpiry != expiryUnlimited {
 			return nil, 0, fmt.Errorf("expiry must not exceed %s", formatExpiry(s.cfg.MaxExpiry))
 		}
-		return nil, 0, nil
+		return nil, expiryUnlimited, nil
 	}
 	duration, err := parseExpiry(value)
 	if err != nil || duration <= 0 {
 		return nil, 0, fmt.Errorf("use an expiry such as 1h, 1d, or 7d")
 	}
-	if s.cfg.MaxExpiry > 0 && duration > s.cfg.MaxExpiry {
+	if s.cfg.MaxExpiry != expiryUnlimited && duration > s.cfg.MaxExpiry {
 		return nil, 0, fmt.Errorf("expiry exceeds maximum of %s", formatExpiry(s.cfg.MaxExpiry))
 	}
 	t := time.Now().UTC().Add(duration)
@@ -387,10 +390,14 @@ func extractHTMLTitle(path string) string {
 	}
 }
 
+// expiryUnlimited marks "never expires". It is a distinct sentinel rather than
+// zero so an unset configuration value can still fall back to a default.
+const expiryUnlimited = time.Duration(-1)
+
 func parseExpiry(value string) (time.Duration, error) {
 	value = strings.TrimSpace(strings.ToLower(value))
 	if value == "never" {
-		return 0, nil
+		return expiryUnlimited, nil
 	}
 	if strings.HasSuffix(value, "d") {
 		days, err := time.ParseDuration(strings.TrimSuffix(value, "d") + "h")
@@ -403,10 +410,28 @@ func parseExpiry(value string) (time.Duration, error) {
 }
 
 func formatExpiry(d time.Duration) string {
+	if d == expiryUnlimited {
+		return "never"
+	}
 	if d%(24*time.Hour) == 0 {
 		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
 	}
 	return d.String()
+}
+
+// ttlSeconds stores an unlimited TTL as -1 so it round-trips through SQLite.
+func ttlSeconds(d time.Duration) int64 {
+	if d == expiryUnlimited {
+		return -1
+	}
+	return int64(d / time.Second)
+}
+
+func ttlDuration(seconds int64) time.Duration {
+	if seconds < 0 {
+		return expiryUnlimited
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 type uploadError struct {

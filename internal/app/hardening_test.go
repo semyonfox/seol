@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func newFilePart(t *testing.T, body *bytes.Buffer, name string, data []byte) string {
@@ -116,5 +117,49 @@ func TestExpiredAndMissingArtifactsKeepTheirPolicy(t *testing.T) {
 		if got := resp.Header.Get("Content-Security-Policy"); got != artifactCSP {
 			t.Fatalf("%s policy = %q", target, got)
 		}
+	}
+}
+
+func TestUnlimitedExpirySurvivesDefaulting(t *testing.T) {
+	t.Setenv("SEOL_TOKEN", strings.Repeat("t", 32))
+	t.Setenv("SEOL_DEFAULT_EXPIRY", "never")
+	t.Setenv("SEOL_MAX_EXPIRY", "never")
+	cfg, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := configWithDefaults(cfg); got.MaxExpiry != expiryUnlimited || got.DefaultExpiry != expiryUnlimited {
+		t.Fatalf("never was overwritten: default=%v max=%v", got.DefaultExpiry, got.MaxExpiry)
+	}
+}
+
+func TestDefaultExpiryOfNeverRequiresUnlimitedMaximum(t *testing.T) {
+	err := validateConfig(configWithDefaults(Config{DefaultExpiry: expiryUnlimited, MaxExpiry: 24 * time.Hour}))
+	if err == nil {
+		t.Fatal("expected never default with a bounded maximum to be rejected")
+	}
+}
+
+func TestPublishNeverWhenMaximumIsUnlimited(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", MaxExpiry: expiryUnlimited})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	p := uploadTestFile(t, web.URL, "page.html", []byte("<h1>hello</h1>"), "never")
+	if p.ExpiresAt != nil {
+		t.Fatalf("expires_at = %v, want null", *p.ExpiresAt)
+	}
+	if p.TTLSeconds >= 0 {
+		t.Fatalf("ttl_seconds = %d, want a negative unlimited marker", p.TTLSeconds)
+	}
+
+	// A replacement must inherit "never" rather than deriving a bogus expiry.
+	replaced := replaceTestFile(t, web.URL, p.ID, []byte("<h1>second</h1>"))
+	if replaced.ExpiresAt != nil {
+		t.Fatalf("replacement expires_at = %v, want null", *replaced.ExpiresAt)
 	}
 }

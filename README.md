@@ -123,6 +123,9 @@ seol publish ./report-site
 # Deliberately create a separate public URL
 seol publish --new ./report-site
 
+# Never expire; requires the server to run with SEOL_MAX_EXPIRY=never
+seol publish --expires never ./report-site
+
 # Manage pages
 seol list
 # See local metadata for pages published from this machine, including source paths
