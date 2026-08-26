@@ -23,6 +23,13 @@ passive static assets can also be served as files. Inline scripts, external
 scripts, modules, event handlers, workers, and JavaScript URLs are blocked by
 the artifact CSP.
 
+Checkbox and radio inputs are the one interactive exception. They hold state in
+the CSS `:checked` pseudo-class alone, so a page can offer choices without
+scripting. `<form>`, `<button>`, `<select>`, and `<textarea>` stay blocked and
+the CSP sets `form-action 'none'` with no `allow-forms` sandbox token, so a
+selection can never be submitted anywhere. See
+[Interactive choices](#interactive-choices).
+
 ## Why Seol exists
 
 AI agents are increasingly good at turning work into useful little HTML
@@ -54,6 +61,7 @@ file store.
 - Same-source publishing updates the existing URL; `--new` creates another
 - Restrictive CSP blocks JavaScript, networking, forms, framing, navigation,
   popups, active embeds, and workers
+- CSS-only choice pages: radio and checkbox inputs with no way to submit
 - SQLite metadata and filesystem content storage
 - Configurable expiry with automatic cleanup
 - Atomic page replacement without changing the URL
@@ -143,9 +151,10 @@ relative asset URLs such as `assets/chart.svg`; root-relative URLs such as
 page URL.
 
 Every `.html` and `.htm` file is parsed before activation. Uploads containing
-scripts, event-handler attributes, `javascript:` URLs, forms and form controls,
-frames, active embeds, `<base>`, or meta refresh are rejected with an
-`ACTIVE_HTML` error. The CSP remains the enforcement boundary in the browser;
+scripts, event-handler attributes, `javascript:` URLs, forms and submittable
+form controls, frames, active embeds, `<base>`, or meta refresh are rejected
+with an `ACTIVE_HTML` error. Checkbox and radio inputs are the one exception,
+since they cannot be submitted under the artifact CSP. The CSP remains the enforcement boundary in the browser;
 parser validation gives publishers an immediate, useful failure instead of a
 partially working artifact.
 
@@ -200,6 +209,47 @@ Never place authentication cookies on the content hostname. Seol itself uses
 bearer headers and does not set cookies. Enable trusted proxy headers only when
 the origin is private and every public request reaches it through the
 Cloudflare Tunnel.
+
+## Interactive choices
+
+A published page cannot run JavaScript, submit a form, or reach the network, so
+it cannot send an answer back. It can still *ask* one. Radio and checkbox inputs
+change the CSS `:checked` state, and a sibling selector can reveal a different
+block of text for each selection.
+
+The pattern that makes this useful for agent handoffs is a page that renders a
+copy-pasteable JSON block reflecting the current selection:
+
+```html
+<input class="picker" type="radio" name="tone" id="tone-formal" checked>
+<input class="picker" type="radio" name="tone" id="tone-casual">
+
+<main class="card">
+  <label for="tone-formal">Formal</label>
+  <label for="tone-casual">Casual</label>
+<pre>{
+  "tone": "<span class="v v-tone-formal">formal</span><span class="v v-tone-casual">casual</span>"
+}</pre>
+</main>
+```
+
+```css
+.picker { position:absolute; width:1px; height:1px; opacity:0; }
+.v { display: none; }
+#tone-formal:checked ~ .card .v-tone-formal,
+#tone-casual:checked ~ .card .v-tone-casual { display: inline; }
+```
+
+The unselected values are `display:none`, so selecting the block copies only the
+chosen answer. The reader picks their options and pastes the JSON back into the
+conversation. Nothing is downloaded, stored, or sent to a server.
+
+Two structural requirements: every input must appear *before* the output block
+in the document, because `~` only matches following siblings; and each group
+needs one `checked` default so the JSON is always complete.
+
+`examples/choices/index.html` is a complete working page with three questions.
+Publish it with `seol publish examples/choices/index.html`.
 
 ### Live instance
 

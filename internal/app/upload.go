@@ -311,11 +311,34 @@ var activeHTMLTags = map[string]bool{
 	"frame":    true,
 	"frameset": true,
 	"iframe":   true,
-	"input":    true,
 	"object":   true,
 	"script":   true,
 	"select":   true,
 	"textarea": true,
+}
+
+// passiveInputTypes are the only inputs Seol accepts. Checkboxes and radios
+// hold state entirely in the CSS :checked pseudo-class, so a page can offer
+// choices without scripting. They stay inert under the artifact CSP, which has
+// no allow-forms sandbox token and sets form-action 'none', and <form>,
+// <button>, <select>, and <textarea> remain blocked, so nothing can be
+// submitted anywhere.
+var passiveInputTypes = map[string]bool{"checkbox": true, "radio": true}
+
+func inputViolation(token html.Token) string {
+	kind := "text"
+	for _, attribute := range token.Attr {
+		// Browsers honour the first of a repeated attribute, so matching that
+		// keeps the check aligned with what will actually render.
+		if strings.EqualFold(attribute.Key, "type") {
+			kind = strings.ToLower(strings.TrimSpace(attribute.Val))
+			break
+		}
+	}
+	if passiveInputTypes[kind] {
+		return ""
+	}
+	return `<input type="` + kind + `">`
 }
 
 func validatePassiveHTMLTree(root string) error {
@@ -362,6 +385,11 @@ func passiveHTMLViolation(path string) (string, error) {
 		tag := strings.ToLower(token.Data)
 		if activeHTMLTags[tag] {
 			return "<" + tag + ">", nil
+		}
+		if tag == "input" {
+			if reason := inputViolation(token); reason != "" {
+				return reason, nil
+			}
 		}
 		metaRefresh := false
 		for _, attribute := range token.Attr {

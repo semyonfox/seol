@@ -469,3 +469,107 @@ func TestRequestLogNeverContainsALivePageID(t *testing.T) {
 		t.Fatalf("expected a redacted path in the log:\n%s", logs.String())
 	}
 }
+
+func TestAcceptsPassiveChoiceInputs(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	choice := []byte(`<input type="radio" name="a" id="x" checked><input type="checkbox" id="y"><label for="x">A</label>`)
+	resp := rawUpload(t, web.URL, "choice.html", choice, "")
+	payload, _ := readBody(resp)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d body = %s", resp.StatusCode, payload)
+	}
+}
+
+func TestRejectsSubmittableAndScriptableInputs(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", UploadsPerMinute: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	for name, markup := range map[string]string{
+		"text input":    `<input type="text" name="q">`,
+		"untyped input": `<input name="q">`,
+		"submit input":  `<input type="submit" value="Go">`,
+		"image input":   `<input type="image" src="x.png" formaction="https://evil.test">`,
+		"form":          `<form action="https://evil.test"><input type="radio" id="a"></form>`,
+		"button":        `<button>Go</button>`,
+		"event handler": `<input type="radio" id="a" onclick="alert(1)">`,
+	} {
+		resp := rawUpload(t, web.URL, "page.html", []byte(markup), "")
+		payload, _ := readBody(resp)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d body = %s", name, resp.StatusCode, payload)
+		}
+	}
+}
+
+func TestChoiceExamplePublishesAndServes(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	markup, err := os.ReadFile(filepath.Join("..", "..", "examples", "choices", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := uploadTestFile(t, web.URL, "choices.html", markup, "")
+
+	resp, err := http.Get(web.URL + "/p/" + p.ID + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := readBody(resp)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, `type="radio"`) {
+		t.Fatal("served page lost its choice inputs")
+	}
+	csp := resp.Header.Get("Content-Security-Policy")
+	for _, required := range []string{"sandbox;", "form-action 'none'", "script-src 'none'"} {
+		if !strings.Contains(csp, required) {
+			t.Fatalf("CSP %q is missing %q", csp, required)
+		}
+	}
+}
+
+func TestRepeatedInputTypeUsesTheRenderedValue(t *testing.T) {
+	// A browser honours the first type attribute. Reading the last one would
+	// let "<input type=text type=radio>" through as a rendered text box.
+	for markup, wantViolation := range map[string]bool{
+		`<input type="radio" id="a">`:             false,
+		`<input type="text" type="radio" id="a">`: true,
+		`<input type="radio" type="text" id="a">`: false,
+		`<input TYPE="RADIO" id="a">`:             false,
+		`<input type=" checkbox " id="a">`:        false,
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "index.html")
+		if err := os.WriteFile(path, []byte(markup), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		reason, err := passiveHTMLViolation(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (reason != "") != wantViolation {
+			t.Fatalf("%s: violation = %q, want violation = %t", markup, reason, wantViolation)
+		}
+	}
+}
