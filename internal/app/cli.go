@@ -74,7 +74,9 @@ func ConfigureCLI(args []string) error {
 }
 
 func loadClientConfig() clientConfig {
-	c := clientConfig{Server: env("SEOL_SERVER", "https://seol.semyon.ie"), Token: os.Getenv("SEOL_TOKEN")}
+	// No default server: a token must never be sent to a host the user did not
+	// choose. Commands fail with a clear message until one is configured.
+	c := clientConfig{Server: os.Getenv("SEOL_SERVER"), Token: os.Getenv("SEOL_TOKEN")}
 	stored := readClientConfigFile()
 	if os.Getenv("SEOL_SERVER") == "" && stored.Server != "" {
 		c.Server = stored.Server
@@ -112,6 +114,32 @@ func readClientConfigFile() clientConfig {
 		}
 	}
 	return c
+}
+
+func resolveServer(server string) (string, error) {
+	server = strings.TrimRight(strings.TrimSpace(server), "/")
+	if server == "" {
+		return "", errors.New("Seol server is not configured; run: seol configure --server https://your-seol-host")
+	}
+	return server, nil
+}
+
+// checkedEndpoint validates the server and appends an already-trusted path.
+func checkedEndpoint(server, path string) (string, error) {
+	base, err := resolveServer(server)
+	if err != nil {
+		return "", err
+	}
+	return base + path, nil
+}
+
+// pathSafeID guards page identifiers before they are interpolated into a URL
+// path, so a stray argument cannot redirect the request to another endpoint.
+func pathSafeID(id string) (string, error) {
+	if !validID(id) {
+		return "", fmt.Errorf("invalid page ID: %q", id)
+	}
+	return id, nil
 }
 
 func clientConfigDir() (string, error) {
@@ -210,8 +238,12 @@ func uploadCommand(method, id string, args []string) error {
 	if *token == "" {
 		return errors.New("Seol token is not configured")
 	}
+	resolvedServer, err := resolveServer(*server)
+	if err != nil {
+		return err
+	}
 	sourcePath := flags.Arg(0)
-	stateKey, err := sourceStateKey(*server, sourcePath)
+	stateKey, err := sourceStateKey(resolvedServer, sourcePath)
 	if err != nil {
 		return err
 	}
@@ -257,9 +289,13 @@ func uploadCommand(method, id string, args []string) error {
 	if err = writer.Close(); err != nil {
 		return err
 	}
-	endpoint := strings.TrimRight(*server, "/") + "/api/v1/pages"
+	endpoint := resolvedServer + "/api/v1/pages"
 	if method == http.MethodPut {
-		endpoint += "/" + id + "/content"
+		safeID, idErr := pathSafeID(id)
+		if idErr != nil {
+			return idErr
+		}
+		endpoint += "/" + safeID + "/content"
 	}
 	req, err := http.NewRequest(method, endpoint, &body)
 	if err != nil {
@@ -290,7 +326,7 @@ func uploadCommand(method, id string, args []string) error {
 	state.History[stateKey] = clientPageEntry{
 		ID:          p.ID,
 		URL:         p.URL,
-		Server:      strings.TrimRight(*server, "/"),
+		Server:      resolvedServer,
 		Source:      sourceLocation,
 		Title:       p.Title,
 		PublishedAt: time.Now().UTC().Format(time.RFC3339),
@@ -422,7 +458,11 @@ func StatsCLI(args []string) error {
 	if *token == "" {
 		return errors.New("Seol token is not configured")
 	}
-	body, err := clientRequest(http.MethodGet, strings.TrimRight(*server, "/")+"/api/v1/stats", *token)
+	endpoint, err := checkedEndpoint(*server, "/api/v1/stats")
+	if err != nil {
+		return err
+	}
+	body, err := clientRequest(http.MethodGet, endpoint, *token)
 	if err != nil {
 		return err
 	}
@@ -482,9 +522,16 @@ func metadataCommand(kind, id string, args []string) error {
 	if *token == "" {
 		return errors.New("Seol token is not configured")
 	}
-	endpoint := strings.TrimRight(*server, "/") + "/api/v1/pages"
+	endpoint, err := checkedEndpoint(*server, "/api/v1/pages")
+	if err != nil {
+		return err
+	}
 	if id != "" {
-		endpoint += "/" + id
+		safeID, idErr := pathSafeID(id)
+		if idErr != nil {
+			return idErr
+		}
+		endpoint += "/" + safeID
 	}
 	body, err := clientRequest(http.MethodGet, endpoint, *token)
 	if err != nil {
@@ -557,7 +604,15 @@ func DeleteCLI(args []string) error {
 	if *token == "" {
 		return errors.New("Seol token is not configured")
 	}
-	_, err := clientRequest(http.MethodDelete, strings.TrimRight(*server, "/")+"/api/v1/pages/"+id, *token)
+	safeID, err := pathSafeID(id)
+	if err != nil {
+		return err
+	}
+	endpoint, err := checkedEndpoint(*server, "/api/v1/pages/"+safeID)
+	if err != nil {
+		return err
+	}
+	_, err = clientRequest(http.MethodDelete, endpoint, *token)
 	if err == nil {
 		fmt.Println("Deleted:", id)
 	}
@@ -580,11 +635,19 @@ func ExpiryCLI(args []string) error {
 	if *token == "" {
 		return errors.New("Seol token is not configured")
 	}
+	safeID, err := pathSafeID(id)
+	if err != nil {
+		return err
+	}
+	endpoint, err := checkedEndpoint(*server, "/api/v1/pages/"+safeID)
+	if err != nil {
+		return err
+	}
 	payload, err := json.Marshal(map[string]string{"expires_in": duration})
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPatch, strings.TrimRight(*server, "/")+"/api/v1/pages/"+id, bytes.NewReader(payload))
+	req, err := http.NewRequest(http.MethodPatch, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}

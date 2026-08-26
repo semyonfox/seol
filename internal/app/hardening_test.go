@@ -573,3 +573,36 @@ func TestRepeatedInputTypeUsesTheRenderedValue(t *testing.T) {
 		}
 	}
 }
+
+func TestClientCommandsRequireAConfiguredServer(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("SEOL_SERVER", "")
+	t.Setenv("SEOL_TOKEN", "some-token")
+
+	page := filepath.Join(t.TempDir(), "page.html")
+	if err := os.WriteFile(page, []byte("<h1>hi</h1>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, run := range map[string]func() error{
+		"publish": func() error { return UploadCLI([]string{page}) },
+		"list":    func() error { return ListCLI(nil) },
+		"stats":   func() error { return StatsCLI(nil) },
+		"delete":  func() error { return DeleteCLI([]string{strings.Repeat("a", 22)}) },
+		"expiry":  func() error { return ExpiryCLI([]string{strings.Repeat("a", 22), "1d"}) },
+	} {
+		err := run()
+		if err == nil || !strings.Contains(err.Error(), "server is not configured") {
+			t.Fatalf("%s: error = %v, want a configuration error rather than a request to a default host", name, err)
+		}
+	}
+}
+
+func TestClientRejectsMalformedPageIDs(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("SEOL_SERVER", "https://pages.test")
+	t.Setenv("SEOL_TOKEN", "some-token")
+
+	if err := DeleteCLI([]string{"../../api/v1/stats"}); err == nil || !strings.Contains(err.Error(), "invalid page ID") {
+		t.Fatalf("error = %v", err)
+	}
+}

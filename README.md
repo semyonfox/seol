@@ -256,7 +256,8 @@ Publish it with `seol publish examples/choices/index.html`.
 The personal instance is available at
 [seol.semyon.ie](https://seol.semyon.ie). It uses Cloudflare Tunnel,
 keeps page data in the `seol-data` Docker volume, and requires its configured
-token for publishing and management:
+token for publishing and management. The CLI has no default server, so configure
+one before the first publish:
 
 ```bash
 seol configure --server https://seol.semyon.ie --token TOKEN
