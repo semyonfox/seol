@@ -1,6 +1,7 @@
 package app
 
 import (
+	"archive/zip"
 	"bytes"
 	"database/sql"
 	"encoding/json"
@@ -347,5 +348,57 @@ func TestUpgradeFromSchemaWithoutFilesRemoved(t *testing.T) {
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Fatalf("staging directory from the previous version survived: %v", err)
+	}
+}
+
+func TestArchiveCollisionsAreClientErrors(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	for name, entries := range map[string][][2]string{
+		"duplicate entry":            {{"index.html", "<h1>a</h1>"}, {"index.html", "<h1>b</h1>"}},
+		"file shadowed by directory": {{"index.html", "<h1>a</h1>"}, {"a", "x"}, {"a/b", "y"}},
+	} {
+		var body bytes.Buffer
+		writer := zip.NewWriter(&body)
+		for _, entry := range entries {
+			part, createErr := writer.CreateRaw(&zip.FileHeader{Name: entry[0], Method: zip.Store})
+			if createErr != nil {
+				t.Fatal(createErr)
+			}
+			if _, writeErr := part.Write([]byte(entry[1])); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		resp := rawUpload(t, web.URL, "site.zip", body.Bytes(), "")
+		payload, _ := readBody(resp)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d body = %s", name, resp.StatusCode, payload)
+		}
+	}
+}
+
+func TestStagingArchiveDoesNotCollideWithArchiveEntry(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	data := zipBytes(t, map[string]string{"index.html": "<h1>hi</h1>", ".upload.zip": "not really an archive"})
+	resp := rawUpload(t, web.URL, "site.zip", data, "")
+	payload, _ := readBody(resp)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d body = %s", resp.StatusCode, payload)
 	}
 }

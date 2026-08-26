@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -128,7 +129,8 @@ func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, defaultTT
 	if err != nil {
 		return preparedUpload{}, uploadError{400, "INVALID_EXPIRY", err.Error()}
 	}
-	tmp, err := os.MkdirTemp(filepath.Join(s.cfg.DataDir, "pages"), ".upload-")
+	staging := filepath.Join(s.cfg.DataDir, "pages")
+	tmp, err := os.MkdirTemp(staging, stagingPrefix)
 	if err != nil {
 		return preparedUpload{}, err
 	}
@@ -143,15 +145,24 @@ func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, defaultTT
 		}
 		upload.size, upload.files = size, 1
 	case ".zip":
-		archivePath := filepath.Join(tmp, ".upload.zip")
-		_, err := copyLimited(archivePath, file, s.cfg.MaxUpload)
+		// The archive is staged alongside the extraction directory rather than
+		// inside it, so an entry cannot collide with the staging file.
+		staged, err := os.CreateTemp(staging, stagingPrefix+"*.zip")
 		if err != nil {
 			os.RemoveAll(tmp)
+			return preparedUpload{}, err
+		}
+		archivePath := staged.Name()
+		_, err = copyInto(staged, file, s.cfg.MaxUpload)
+		if err != nil {
+			os.RemoveAll(tmp)
+			_ = os.Remove(archivePath)
 			return preparedUpload{}, err
 		}
 		archive, err := zip.OpenReader(archivePath)
 		if err != nil {
 			os.RemoveAll(tmp)
+			_ = os.Remove(archivePath)
 			return preparedUpload{}, uploadError{400, "INVALID_ARCHIVE", "ZIP archive is invalid."}
 		}
 		upload.size, upload.files, err = s.extractZIP(archive, tmp)
@@ -188,6 +199,10 @@ func copyLimited(path string, source io.Reader, limit int64) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	return copyInto(out, source, limit)
+}
+
+func copyInto(out *os.File, source io.Reader, limit int64) (int64, error) {
 	size, copyErr := io.Copy(out, io.LimitReader(source, limit+1))
 	closeErr := out.Close()
 	if copyErr != nil || closeErr != nil {
@@ -202,6 +217,10 @@ func copyLimited(path string, source io.Reader, limit int64) (int64, error) {
 func (s *Server) extractZIP(archive *zip.ReadCloser, destination string) (int64, int, error) {
 	var total int64
 	files, entries := 0, 0
+	// A ZIP may legally repeat a name, and a name may collide with a directory
+	// created for another entry. Both are client errors, not server faults.
+	seenFiles := make(map[string]bool)
+	seenDirs := make(map[string]bool)
 	for _, entry := range archive.File {
 		entries++
 		if entries > s.cfg.MaxFiles {
@@ -223,10 +242,20 @@ func (s *Server) extractZIP(archive *zip.ReadCloser, destination string) (int64,
 		}
 		target := filepath.Join(destination, clean)
 		if entry.FileInfo().IsDir() {
+			if seenFiles[clean] {
+				return 0, 0, errArchiveCollision
+			}
 			if err := os.MkdirAll(target, 0o750); err != nil {
 				return 0, 0, err
 			}
+			markDirs(seenDirs, clean)
 			continue
+		}
+		if seenFiles[clean] || seenDirs[clean] {
+			return 0, 0, errArchiveCollision
+		}
+		if conflictsWithParent(seenFiles, clean) {
+			return 0, 0, errArchiveCollision
 		}
 		files++
 		if entry.UncompressedSize64 > uint64(s.cfg.MaxExtracted) || total+int64(entry.UncompressedSize64) > s.cfg.MaxExtracted {
@@ -242,11 +271,36 @@ func (s *Server) extractZIP(archive *zip.ReadCloser, destination string) (int64,
 		size, err := copyLimited(target, source, s.cfg.MaxExtracted-total)
 		source.Close()
 		if err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				return 0, 0, errArchiveCollision
+			}
 			return 0, 0, err
 		}
+		seenFiles[clean] = true
+		markDirs(seenDirs, filepath.Dir(clean))
 		total += size
 	}
 	return total, files, nil
+}
+
+var errArchiveCollision = uploadError{400, "UNSAFE_ARCHIVE", "Archive contains duplicate or colliding entry names."}
+
+// markDirs records a path and each of its ancestors as directories.
+func markDirs(seen map[string]bool, path string) {
+	for path != "." && path != string(filepath.Separator) {
+		seen[path] = true
+		path = filepath.Dir(path)
+	}
+}
+
+// conflictsWithParent reports whether an ancestor of path was written as a file.
+func conflictsWithParent(seenFiles map[string]bool, path string) bool {
+	for parent := filepath.Dir(path); parent != "." && parent != string(filepath.Separator); parent = filepath.Dir(parent) {
+		if seenFiles[parent] {
+			return true
+		}
+	}
+	return false
 }
 
 var activeHTMLTags = map[string]bool{
