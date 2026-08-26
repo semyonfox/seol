@@ -392,12 +392,14 @@ func TestArtifactPolicyFollowsContentType(t *testing.T) {
 	})
 	created := uploadTestFile(t, web.URL, "site.zip", archive, "")
 
+	// Every artifact response carries the policy, not just active document
+	// types, so a content type Seol does not enumerate cannot slip through.
 	for _, test := range []struct {
 		path          string
 		contentType   string
 		expectsPolicy bool
 	}{
-		{"plan.pdf", "application/pdf", false},
+		{"plan.pdf", "application/pdf", true},
 		{"diagram.svg", "image/svg+xml", true},
 	} {
 		t.Run(test.path, func(t *testing.T) {

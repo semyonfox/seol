@@ -236,7 +236,6 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	setArtifactContentPolicy(w, contentType)
 	etag := fmt.Sprintf(`"v%d-%x-%x"`, p.ContentVersion, info.Size(), info.ModTime().UnixNano())
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "public, no-cache")
@@ -249,30 +248,23 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 }
 
 func setArtifactCommonHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy", artifactCSP)
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
-	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	// The artifact CSP sets the sandbox directive, which gives the page an
+	// opaque origin. A same-origin resource policy would then reject the page's
+	// own stylesheets, images, and fonts as cross-origin, so published sites
+	// must be served with a cross-origin policy. Artifacts are public to anyone
+	// holding the unguessable URL, so this grants no additional access.
+	w.Header().Set("Cross-Origin-Resource-Policy", "cross-origin")
 	w.Header().Set("Permissions-Policy", "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 }
 
-func setArtifactContentPolicy(w http.ResponseWriter, contentType string) {
-	mediaType, _, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		mediaType = contentType
-	}
-	switch mediaType {
-	case "text/html", "application/xhtml+xml", "image/svg+xml":
-		w.Header().Set("Content-Security-Policy", artifactCSP)
-	}
-}
-
 func writeArtifactNotFound(w http.ResponseWriter, r *http.Request) {
-	setArtifactContentPolicy(w, "text/html")
 	http.NotFound(w, r)
 }
 
 func writeGonePage(w http.ResponseWriter) {
-	setArtifactContentPolicy(w, "text/html")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.WriteHeader(http.StatusGone)
