@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -420,5 +421,51 @@ func TestReplaceIsRateLimited(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want 429", resp.StatusCode)
+	}
+}
+
+func TestRequestLogsOmitPageIdentifiers(t *testing.T) {
+	id := strings.Repeat("a", 22)
+	for path, want := range map[string]string{
+		"/p/" + id + "/":                   "/p/" + redactedID + "/",
+		"/p/" + id + "/assets/site.css":    "/p/" + redactedID + "/assets/site.css",
+		"/api/v1/pages/" + id:              "/api/v1/pages/" + redactedID,
+		"/api/v1/pages/" + id + "/content": "/api/v1/pages/" + redactedID + "/content",
+		"/api/v1/pages":                    "/api/v1/pages",
+		"/health":                          "/health",
+		"/p/not-an-id/":                    "/p/not-an-id/",
+	} {
+		if got := redactPagePath(path); got != want {
+			t.Fatalf("redactPagePath(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+func TestRequestLogNeverContainsALivePageID(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	p := uploadTestFile(t, web.URL, "page.html", []byte("<h1>hi</h1>"), "")
+	resp, err := http.Get(web.URL + "/p/" + p.ID + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if strings.Contains(logs.String(), p.ID) {
+		t.Fatalf("request log leaked page ID %s:\n%s", p.ID, logs.String())
+	}
+	if !strings.Contains(logs.String(), redactedID) {
+		t.Fatalf("expected a redacted path in the log:\n%s", logs.String())
 	}
 }

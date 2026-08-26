@@ -303,8 +303,28 @@ func logging(next http.Handler) http.Handler {
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rw, r)
-		slog.Info("request", "method", r.Method, "path", r.URL.Path, "status", rw.status, "duration_ms", time.Since(start).Milliseconds())
+		slog.Info("request", "method", r.Method, "path", redactPagePath(r.URL.Path), "status", rw.status, "duration_ms", time.Since(start).Milliseconds())
 	})
+}
+
+// redactedID replaces a page identifier in log output.
+const redactedID = "[id]"
+
+// redactPagePath strips page identifiers from a request path before it is
+// logged. A page ID is the capability that grants access to the page, so
+// writing one to the request log would leak the page to anyone who can read
+// logs. The surrounding path is kept so routes remain debuggable.
+func redactPagePath(path string) string {
+	segments := strings.Split(path, "/")
+	for i := 1; i < len(segments); i++ {
+		if segments[i-1] != "p" && segments[i-1] != "pages" {
+			continue
+		}
+		if validID(segments[i]) {
+			segments[i] = redactedID
+		}
+	}
+	return strings.Join(segments, "/")
 }
 
 func securityHeaders(next http.Handler) http.Handler {
