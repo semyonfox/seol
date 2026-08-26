@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"mime"
 	"net/http"
 	"os"
@@ -107,9 +106,7 @@ func (s *Server) deletePage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := removePageFiles(s.cfg.DataDir, id); err != nil {
-		slog.Error("delete page files", "page_id", id, "error", err)
-	}
+	s.reclaimPageFiles(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -197,9 +194,7 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 	if p.Status == "expired" || isExpired(p.ExpiresAt) {
 		if p.Status == "active" {
 			if _, err := s.db.Exec(`UPDATE pages SET status='expired' WHERE id=?`, id); err == nil {
-				if err := removePageFiles(s.cfg.DataDir, id); err != nil {
-					slog.Error("expire page files", "page_id", id, "error", err)
-				}
+				s.reclaimPageFiles(id)
 			}
 		}
 		writeGonePage(w)

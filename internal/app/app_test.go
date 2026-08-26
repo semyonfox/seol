@@ -111,7 +111,7 @@ func TestOpenDatabaseMigratesLegacyPagesSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, column := range []string{"title", "status", "updated_at", "expires_at", "file_count", "content_version", "ttl_seconds"} {
+	for _, column := range []string{"title", "status", "updated_at", "expires_at", "file_count", "content_version", "ttl_seconds", "files_removed"} {
 		var name string
 		if err := db.QueryRow(`SELECT name FROM pragma_table_info('pages') WHERE name = ?`, column).Scan(&name); err != nil {
 			t.Fatalf("column %q: %v", column, err)

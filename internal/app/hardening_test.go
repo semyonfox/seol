@@ -2,10 +2,13 @@ package app
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -161,5 +164,188 @@ func TestPublishNeverWhenMaximumIsUnlimited(t *testing.T) {
 	replaced := replaceTestFile(t, web.URL, p.ID, []byte("<h1>second</h1>"))
 	if replaced.ExpiresAt != nil {
 		t.Fatalf("replacement expires_at = %v, want null", *replaced.ExpiresAt)
+	}
+}
+
+func TestCleanupDoesNotResweepReclaimedPages(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	p := uploadTestFile(t, web.URL, "page.html", []byte("<h1>hello</h1>"), "")
+	if _, err := s.db.Exec(`UPDATE pages SET status = 'deleted' WHERE id = ?`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	s.cleanupExpired()
+
+	var pending int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pages WHERE status IN ('expired','deleted') AND files_removed = 0`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("%d rows would be re-swept on every tick", pending)
+	}
+}
+
+func TestCleanupRetriesWhenFileRemovalFails(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+
+	// An unreclaimable row keeps its flag unset so a later sweep tries again.
+	if _, err := s.db.Exec(`INSERT INTO pages(id,title,status,created_at,updated_at,size_bytes,file_count,content_version,ttl_seconds) VALUES('not-a-valid-page-id','','deleted','','',0,0,1,86400)`); err != nil {
+		t.Fatal(err)
+	}
+	s.cleanupExpired()
+	var removed int
+	if err := s.db.QueryRow(`SELECT files_removed FROM pages WHERE id = 'not-a-valid-page-id'`).Scan(&removed); err != nil {
+		t.Fatal(err)
+	}
+	if removed != 0 {
+		t.Fatal("a failed reclaim must not be marked as done")
+	}
+}
+
+func TestSweepReclaimsOrphanedStagingEntries(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	pages := filepath.Join(s.cfg.DataDir, "pages")
+
+	stale, err := os.MkdirTemp(pages, stagingPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * stagingGrace)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := os.MkdirTemp(pages, legacyStagingPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(legacy, old, old); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := os.MkdirTemp(pages, stagingPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s.sweepStaging()
+
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("staging directory from an earlier version survived: %v", err)
+	}
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("orphaned staging directory survived: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("in-progress upload was reclaimed: %v", err)
+	}
+}
+
+func TestUpgradeFromSchemaWithoutFilesRemoved(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "pages"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "seol.db")
+
+	// A database written by a version that predates files_removed, holding one
+	// live page and one already-deleted page whose files are still on disk.
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE pages (
+		id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active',
+		created_at TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '', expires_at TEXT,
+		size_bytes INTEGER NOT NULL, file_count INTEGER NOT NULL DEFAULT 1,
+		content_version INTEGER NOT NULL DEFAULT 1, ttl_seconds INTEGER NOT NULL DEFAULT 86400)`); err != nil {
+		t.Fatal(err)
+	}
+	live, dead := strings.Repeat("L", 22), strings.Repeat("D", 22)
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	for _, row := range [][]any{
+		{live, "Live page", "active", future},
+		{dead, "Dead page", "deleted", future},
+	} {
+		if _, err := legacy.Exec(`INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds) VALUES(?,?,?,'2020-01-01T00:00:00Z','2020-01-01T00:00:00Z',?,10,1,1,3600)`, row...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{live, dead} {
+		if err := os.MkdirAll(filepath.Join(dir, "pages", id, "v1"), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "pages", id, "v1", "index.html"), []byte("<h1>kept</h1>"), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// An in-progress upload orphaned by the crash that ended the old process.
+	orphan, err := os.MkdirTemp(filepath.Join(dir, "pages"), legacyStagingPrefix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * stagingGrace)
+	if err := os.Chtimes(orphan, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := New(Config{DataDir: dir, PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatalf("upgrade failed to open the database: %v", err)
+	}
+	closeTestServer(t, s)
+
+	// Existing metadata survives the migration untouched.
+	var title, status string
+	var ttl, removed int64
+	if err := s.db.QueryRow(`SELECT title, status, ttl_seconds, files_removed FROM pages WHERE id = ?`, live).Scan(&title, &status, &ttl, &removed); err != nil {
+		t.Fatal(err)
+	}
+	if title != "Live page" || status != "active" || ttl != 3600 || removed != 0 {
+		t.Fatalf("live row = %q %q ttl=%d removed=%d", title, status, ttl, removed)
+	}
+
+	s.cleanupExpired()
+
+	// The live page keeps its content and still serves.
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+	resp, err := http.Get(web.URL + "/p/" + live + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := readBody(resp)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "kept") {
+		t.Fatalf("live page after upgrade: status=%d body=%q", resp.StatusCode, body)
+	}
+
+	// The deleted page is reclaimed exactly once and then left alone.
+	if _, err := os.Stat(filepath.Join(dir, "pages", dead)); !os.IsNotExist(err) {
+		t.Fatalf("deleted page files survived the upgrade sweep: %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT files_removed FROM pages WHERE id = ?`, dead).Scan(&removed); err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatal("reclaimed page was not marked, so it would be swept again every tick")
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("staging directory from the previous version survived: %v", err)
 	}
 }

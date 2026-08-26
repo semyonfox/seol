@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -38,7 +41,8 @@ func openDatabase(path string) (*sql.DB, error) {
 		size_bytes INTEGER NOT NULL,
 		file_count INTEGER NOT NULL DEFAULT 1,
 		content_version INTEGER NOT NULL DEFAULT 1,
-		ttl_seconds INTEGER NOT NULL DEFAULT 86400
+		ttl_seconds INTEGER NOT NULL DEFAULT 86400,
+		files_removed INTEGER NOT NULL DEFAULT 0
 	)`)
 	if err != nil {
 		db.Close()
@@ -67,6 +71,7 @@ func migratePages(db *sql.DB) error {
 		{"file_count", "file_count INTEGER NOT NULL DEFAULT 1"},
 		{"content_version", "content_version INTEGER NOT NULL DEFAULT 1"},
 		{"ttl_seconds", "ttl_seconds INTEGER NOT NULL DEFAULT 86400"},
+		{"files_removed", "files_removed INTEGER NOT NULL DEFAULT 0"},
 	} {
 		if columns[migration.name] {
 			continue
@@ -136,7 +141,9 @@ func (s *Server) cleanupExpired() {
 	if _, err := s.db.Exec(`UPDATE pages SET status = 'expired' WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= ?`, now); err != nil {
 		return
 	}
-	rows, err := s.db.Query(`SELECT id FROM pages WHERE status IN ('expired', 'deleted')`)
+	// Only rows whose files are still on disk are swept. Without this the sweep
+	// would re-remove every page ever published on every tick.
+	rows, err := s.db.Query(`SELECT id FROM pages WHERE status IN ('expired', 'deleted') AND files_removed = 0`)
 	if err != nil {
 		return
 	}
@@ -154,8 +161,55 @@ func (s *Server) cleanupExpired() {
 		return
 	}
 	for _, id := range ids {
-		if err := removePageFiles(s.cfg.DataDir, id); err != nil {
-			slog.Error("clean up page files", "page_id", id, "error", err)
+		s.reclaimPageFiles(id)
+	}
+	s.sweepStaging()
+}
+
+// reclaimPageFiles removes a page's content and records that it is gone. A
+// failure leaves the flag unset so the next sweep retries.
+func (s *Server) reclaimPageFiles(id string) {
+	if err := removePageFiles(s.cfg.DataDir, id); err != nil {
+		slog.Error("clean up page files", "page_id", id, "error", err)
+		return
+	}
+	if _, err := s.db.Exec(`UPDATE pages SET files_removed = 1 WHERE id = ?`, id); err != nil {
+		slog.Error("record page file removal", "page_id", id, "error", err)
+	}
+}
+
+// stagingPrefix names the in-progress upload directories and archives that live
+// under pages/. It cannot collide with a page ID, which is always 22 characters
+// of URL-safe base64.
+const stagingPrefix = ".seol-staging-"
+
+// legacyStagingPrefix named staging directories before stagingPrefix. It is
+// swept too, so upgrading reclaims orphans left by an earlier version.
+const legacyStagingPrefix = ".upload-"
+
+// stagingGrace is far longer than the server write timeout, so the sweep can
+// never reclaim an upload that is still being received.
+const stagingGrace = time.Hour
+
+// sweepStaging reclaims staging directories and archives orphaned by a crash or
+// restart, which the request-scoped cleanup cannot cover.
+func (s *Server) sweepStaging() {
+	root := filepath.Join(s.cfg.DataDir, "pages")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-stagingGrace)
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), stagingPrefix) && !strings.HasPrefix(entry.Name(), legacyStagingPrefix) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil {
+			slog.Error("sweep staging entry", "name", entry.Name(), "error", err)
 		}
 	}
 }
