@@ -16,7 +16,18 @@ substitute for authentication.
 - Artifact responses use a CSP sandbox without `allow-scripts` or
   `allow-same-origin`. Inline CSS works, while all JavaScript, external
   connections, forms, framing, workers, popups, navigation, and active embeds
-  are blocked.
+  are blocked. The policy is applied to every artifact response, not only to
+  document types, so an unenumerated content type cannot escape it.
+- Checkbox and radio inputs are permitted so a page can offer choices through
+  the CSS `:checked` pseudo-class. Nothing can be submitted: `<form>`,
+  `<button>`, `<select>`, and `<textarea>` are rejected, the policy sets
+  `form-action 'none'`, and the sandbox has no `allow-forms` token.
+- Artifacts are served with `Cross-Origin-Resource-Policy: cross-origin`. The
+  sandbox gives each page an opaque origin, so a same-origin policy would block
+  the page's own stylesheets and images. Artifacts are readable by anyone
+  holding the unguessable URL, so this grants no additional access.
+- Request logs redact page identifiers. A page ID is the capability that grants
+  access to the page and must not reach a log.
 - Use a dedicated content hostname with no sensitive cookies.
 - Never scope API or administration cookies to a parent domain shared with the
   content hostname.

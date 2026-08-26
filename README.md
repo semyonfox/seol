@@ -202,8 +202,9 @@ docker compose --profile tunnel up --build -d
 ```
 
 Uploaded pages are arbitrary untrusted content. Seol applies an opaque-origin
-CSP sandbox and blocks all JavaScript, external network connections, forms,
-framing, workers, popups, and navigation. A separate content domain remains
+CSP sandbox to every artifact response and blocks all JavaScript, external
+network connections, forms, framing, workers, popups, and navigation. Request
+logs redact page identifiers, since the identifier is what grants access. A separate content domain remains
 useful defence in depth but is not required for the initial script-free model.
 Never place authentication cookies on the content hostname. Seol itself uses
 bearer headers and does not set cookies. Enable trusted proxy headers only when
