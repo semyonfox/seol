@@ -92,7 +92,10 @@ async function installBinary(binaryPath, assetName) {
   }
   const expected = expectedLine.trim().split(/\s+/)[0];
   const actual = crypto.createHash("sha256").update(binary).digest("hex");
-  if (!crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected))) {
+  // Compare lengths first: timingSafeEqual throws on a length mismatch, which a
+  // malformed checksums.txt would otherwise surface as an opaque RangeError.
+  if (actual.length !== expected.length ||
+      !crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected))) {
     throw new Error(`checksum verification failed for ${assetName}`);
   }
   fs.mkdirSync(path.dirname(binaryPath), { recursive: true, mode: 0o700 });
