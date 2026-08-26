@@ -164,7 +164,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/pages", s.auth(s.listPages))
 	mux.HandleFunc("GET /api/v1/stats", s.auth(s.getStats))
 	mux.HandleFunc("GET /api/v1/pages/{id}", s.auth(s.getPage))
-	mux.HandleFunc("PUT /api/v1/pages/{id}/content", s.auth(s.limitUploadConcurrency(s.replacePage)))
+	mux.HandleFunc("PUT /api/v1/pages/{id}/content", s.auth(s.limitUploads(s.limitUploadConcurrency(s.replacePage))))
 	mux.HandleFunc("PATCH /api/v1/pages/{id}", s.auth(s.updatePage))
 	mux.HandleFunc("DELETE /api/v1/pages/{id}", s.auth(s.deletePage))
 	mux.HandleFunc("GET /p/{id}/{path...}", s.servePage)

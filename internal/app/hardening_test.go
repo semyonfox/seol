@@ -402,3 +402,23 @@ func TestStagingArchiveDoesNotCollideWithArchiveEntry(t *testing.T) {
 		t.Fatalf("status = %d body = %s", resp.StatusCode, payload)
 	}
 }
+
+func TestReplaceIsRateLimited(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", UploadsPerMinute: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	p := uploadTestFile(t, web.URL, "page.html", []byte("<h1>hello</h1>"), "")
+	// The publish above consumed one of the two permits.
+	replaceTestFile(t, web.URL, p.ID, []byte("<h1>second</h1>"))
+
+	resp := rawReplace(t, web.URL, p.ID, []byte("<h1>third</h1>"))
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", resp.StatusCode)
+	}
+}
