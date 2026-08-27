@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const artifactCSP = "sandbox; default-src 'none'; script-src 'none'; style-src 'unsafe-inline' 'self'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'none'; form-action 'none'; frame-src 'none'; child-src 'none'; object-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+const artifactCSP = "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' 'self'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'none'; form-action 'none'; frame-src 'none'; child-src 'none'; object-src 'none'; worker-src 'none'; manifest-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 
 type stats struct {
 	ActivePages   int     `json:"active_pages"`
@@ -134,7 +134,7 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Provide expires_in as JSON.")
 		return
 	}
-	expiresAt, ttl, err := s.expiryFromForm(request.ExpiresIn, time.Duration(current.TTLSeconds)*time.Second)
+	expiresAt, ttl, err := s.expiryFromForm(request.ExpiresIn, ttlDuration(current.TTLSeconds))
 	if err != nil || expiresAt == nil {
 		message := "Expiry must be between one hour and seven days."
 		if err != nil {
@@ -144,7 +144,7 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	updated, err := s.scanPage(s.db.QueryRowContext(r.Context(), `UPDATE pages SET updated_at=?,expires_at=?,ttl_seconds=? WHERE id=? AND status='active' RETURNING `+pageColumns, now, expiresAt.UTC().Format(time.RFC3339), int64(ttl/time.Second), id))
+	updated, err := s.scanPage(s.db.QueryRowContext(r.Context(), `UPDATE pages SET updated_at=?,expires_at=?,ttl_seconds=? WHERE id=? AND status='active' RETURNING `+pageColumns, now, expiresAt.UTC().Format(time.RFC3339), ttlSeconds(ttl), id))
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusConflict, "CONFLICT", "Page changed while updating expiry; retry.")
 		return
@@ -179,12 +179,12 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 	setArtifactCommonHeaders(w)
 	id := r.PathValue("id")
 	if !validID(id) {
-		writeArtifactNotFound(w, r)
+		writeNotFoundPage(w)
 		return
 	}
 	p, err := s.getPageRecord(id)
 	if err != nil {
-		writeArtifactNotFound(w, r)
+		writeNotFoundPage(w)
 		return
 	}
 	if p.Status == "deleted" {
@@ -209,27 +209,23 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 		clean = "index.html"
 	}
 	if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		writeArtifactNotFound(w, r)
+		writeNotFoundPage(w)
 		return
 	}
 	root := filepath.Join(s.cfg.DataDir, "pages", id, fmt.Sprintf("v%d", p.ContentVersion))
 	path := filepath.Join(root, clean)
 	info, err := os.Stat(path)
 	if err != nil {
-		writeArtifactNotFound(w, r)
+		writeNotFoundPage(w)
 		return
 	}
 	if info.IsDir() {
 		path = filepath.Join(path, "index.html")
 		info, err = os.Stat(path)
 		if err != nil {
-			writeArtifactNotFound(w, r)
+			writeNotFoundPage(w)
 			return
 		}
-	}
-	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
-	if contentType == "" {
-		contentType = "application/octet-stream"
 	}
 	etag := fmt.Sprintf(`"v%d-%x-%x"`, p.ContentVersion, info.Size(), info.ModTime().UnixNano())
 	w.Header().Set("ETag", etag)
@@ -238,29 +234,53 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(path)))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
 	w.Header().Set("Content-Type", contentType)
+	setArtifactContentPolicy(w, contentType)
 	http.ServeFile(w, r, path)
 }
 
 func setArtifactCommonHeaders(w http.ResponseWriter) {
-	w.Header().Set("Content-Security-Policy", artifactCSP)
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
-	// The artifact CSP sets the sandbox directive, which gives the page an
-	// opaque origin. A same-origin resource policy would then reject the page's
-	// own stylesheets, images, and fonts as cross-origin, so published sites
-	// must be served with a cross-origin policy. Artifacts are public to anyone
-	// holding the unguessable URL, so this grants no additional access.
+	// The artifact CSP sets a sandbox directive, which gives the page an opaque
+	// origin. A same-origin resource policy would then reject the page's own
+	// stylesheets, images, and fonts as cross-origin. Artifacts are public to
+	// anyone holding the unguessable URL, so a cross-origin policy grants no
+	// additional access.
 	w.Header().Set("Cross-Origin-Resource-Policy", "cross-origin")
-	w.Header().Set("Permissions-Policy", "accelerometer=(), autoplay=(), camera=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()")
+	w.Header().Set("Permissions-Policy", "accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 }
 
-func writeArtifactNotFound(w http.ResponseWriter, r *http.Request) {
-	http.NotFound(w, r)
+// setArtifactContentPolicy applies the artifact CSP only to types the browser
+// renders as an active document. A passive type such as application/pdf is
+// deliberately left without it, because the sandbox directive blocks the
+// browser's built-in viewer.
+func setArtifactContentPolicy(w http.ResponseWriter, contentType string) {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = contentType
+	}
+	switch mediaType {
+	case "text/html", "application/xhtml+xml", "image/svg+xml":
+		w.Header().Set("Content-Security-Policy", artifactCSP)
+	}
+}
+
+func writeNotFoundPage(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", artifactCSP)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Broken link — Seol</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#faf7f2;color:#201d19;font:18px/1.6 system-ui,sans-serif}main{width:min(34rem,calc(100% - 2rem))}h1{font-size:clamp(2.4rem,8vw,4.5rem);letter-spacing:-.04em;line-height:1;margin:0 0 1rem}p{color:#6d655c}</style><main><h1>This link is broken</h1><p>The requested file does not exist in this Seol page. Check the link or ask the publisher to upload the missing file.</p></main></html>`))
 }
 
 func writeGonePage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", artifactCSP)
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.WriteHeader(http.StatusGone)
 	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Link expired — Seol</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#faf7f2;color:#201d19;font:18px/1.6 system-ui,sans-serif}main{width:min(34rem,calc(100% - 2rem))}h1{font-size:clamp(2.4rem,8vw,4.5rem);letter-spacing:-.04em;line-height:1;margin:0 0 1rem}p{color:#6d655c}</style><main><h1>This link has expired</h1><p>Seol pages are temporary. This page has expired or been removed and is no longer available.</p></main></html>`))

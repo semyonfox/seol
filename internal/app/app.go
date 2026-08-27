@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/semyonfox/seol/assets"
 	_ "modernc.org/sqlite"
 )
 
@@ -159,6 +161,8 @@ func New(cfg Config) (*Server, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.landingPage)
+	mux.HandleFunc("GET /logo.svg", serveBrandAsset(assets.LogoSVG))
+	mux.HandleFunc("GET /favicon.svg", serveBrandAsset(assets.IconSVG))
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("POST /api/v1/pages", s.auth(s.limitUploads(s.limitUploadConcurrency(s.createPage))))
 	mux.HandleFunc("GET /api/v1/pages", s.auth(s.listPages))
@@ -267,6 +271,11 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+func publisherID(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return fmt.Sprintf("%x", sum[:12])
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {

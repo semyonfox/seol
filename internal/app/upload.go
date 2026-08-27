@@ -19,16 +19,13 @@ import (
 )
 
 type preparedUpload struct {
-	dir       string
-	size      int64
-	files     int
-	title     string
-	expiresAt *time.Time
-	ttl       time.Duration
+	dir   string
+	size  int64
+	files int
 }
 
 func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
-	upload, err := s.receiveUpload(w, r, s.cfg.DefaultExpiry)
+	upload, title, expiresAt, ttl, err := s.receiveUpload(w, r, s.cfg.DefaultExpiry)
 	if err != nil {
 		writeUploadError(w, err)
 		return
@@ -52,15 +49,16 @@ func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	var expiry any
-	if upload.expiresAt != nil {
-		expiry = upload.expiresAt.UTC().Format(time.RFC3339)
+	if expiresAt != nil {
+		expiry = expiresAt.UTC().Format(time.RFC3339)
 	}
-	p, err := s.scanPage(s.db.QueryRowContext(r.Context(), `INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds) VALUES(?,?,'active',?,?,?,?,?,1,?) RETURNING `+pageColumns, id, upload.title, now, now, expiry, upload.size, upload.files, ttlSeconds(upload.ttl)))
+	_, err = s.db.Exec(`INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds,publisher_id) VALUES(?,?,'active',?,?,?,?,?,1,?,?)`, id, title, now, now, expiry, upload.size, upload.files, ttlSeconds(ttl), publisherID(s.cfg.UploadToken))
 	if err != nil {
 		_ = os.RemoveAll(root)
 		writeError(w, 500, "INTERNAL", "Could not record page.")
 		return
 	}
+	p, _ := s.getPageRecord(id)
 	writeJSON(w, http.StatusCreated, p)
 }
 
@@ -79,7 +77,12 @@ func (s *Server) replacePage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "NOT_FOUND", "Active page not found.")
 		return
 	}
-	upload, err := s.receiveUpload(w, r, ttlDuration(current.TTLSeconds))
+	if err != nil {
+		writeError(w, 500, "INTERNAL", "Could not read page.")
+		return
+	}
+	ttl := ttlDuration(current.TTLSeconds)
+	upload, title, _, requestedTTL, err := s.receiveUpload(w, r, ttl)
 	if err != nil {
 		writeUploadError(w, err)
 		return
@@ -92,56 +95,61 @@ func (s *Server) replacePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	if requestedTTL != 0 {
+		ttl = requestedTTL
+	}
 	var expiresAt any
-	if upload.expiresAt != nil {
-		expiresAt = upload.expiresAt.UTC().Format(time.RFC3339)
+	if ttl != expiryUnlimited {
+		expiresAt = time.Now().UTC().Add(ttl).Format(time.RFC3339)
 	}
-	if upload.title == "" {
-		upload.title = current.Title
+	if title == "" {
+		title = current.Title
 	}
-	p, err := s.scanPage(s.db.QueryRowContext(r.Context(), `UPDATE pages SET title=?,updated_at=?,expires_at=?,size_bytes=?,file_count=?,content_version=?,ttl_seconds=? WHERE id=? AND content_version=? AND status='active' RETURNING `+pageColumns, upload.title, now, expiresAt, upload.size, upload.files, version, ttlSeconds(upload.ttl), id, current.ContentVersion))
-	if errors.Is(err, sql.ErrNoRows) {
-		_ = os.RemoveAll(final)
-		writeError(w, http.StatusConflict, "CONFLICT", "Page changed during replacement; retry.")
-		return
-	}
+	result, err := s.db.Exec(`UPDATE pages SET title=?,updated_at=?,expires_at=?,size_bytes=?,file_count=?,content_version=?,ttl_seconds=? WHERE id=? AND content_version=? AND status='active'`, title, now, expiresAt, upload.size, upload.files, version, ttlSeconds(ttl), id, current.ContentVersion)
 	if err != nil {
 		_ = os.RemoveAll(final)
 		writeError(w, 500, "INTERNAL", "Could not record replacement.")
 		return
 	}
+	rows, _ := result.RowsAffected()
+	if rows != 1 {
+		_ = os.RemoveAll(final)
+		writeError(w, 409, "CONFLICT", "Page changed during replacement; retry.")
+		return
+	}
 	_ = os.RemoveAll(filepath.Join(s.cfg.DataDir, "pages", id, fmt.Sprintf("v%d", current.ContentVersion)))
+	p, _ := s.getPageRecord(id)
 	writeJSON(w, http.StatusOK, p)
 }
 
-func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, defaultTTL time.Duration) (preparedUpload, error) {
+func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, defaultTTL time.Duration) (preparedUpload, string, *time.Time, time.Duration, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUpload+(2<<20))
 	if err := r.ParseMultipartForm(s.cfg.MaxUpload); err != nil {
-		return preparedUpload{}, uploadError{413, "UPLOAD_TOO_LARGE", "Upload exceeds the configured limit."}
+		return preparedUpload{}, "", nil, 0, uploadError{413, "UPLOAD_TOO_LARGE", "Upload exceeds the configured limit."}
 	}
 	defer r.MultipartForm.RemoveAll()
 	file, header, err := r.FormFile("file")
 	if err != nil {
-		return preparedUpload{}, uploadError{400, "FILE_REQUIRED", "An HTML or ZIP file is required."}
+		return preparedUpload{}, "", nil, 0, uploadError{400, "FILE_REQUIRED", "An HTML or ZIP file is required."}
 	}
 	defer file.Close()
 	expiresAt, ttl, err := s.expiryFromForm(r.FormValue("expires_in"), defaultTTL)
 	if err != nil {
-		return preparedUpload{}, uploadError{400, "INVALID_EXPIRY", err.Error()}
+		return preparedUpload{}, "", nil, 0, uploadError{400, "INVALID_EXPIRY", err.Error()}
 	}
 	staging := filepath.Join(s.cfg.DataDir, "pages")
 	tmp, err := os.MkdirTemp(staging, stagingPrefix)
 	if err != nil {
-		return preparedUpload{}, err
+		return preparedUpload{}, "", nil, 0, err
 	}
-	upload := preparedUpload{dir: tmp, expiresAt: expiresAt, ttl: ttl}
+	upload := preparedUpload{dir: tmp}
 	ext := strings.ToLower(filepath.Ext(header.Filename))
 	switch ext {
 	case ".html", ".htm":
 		size, err := copyLimited(filepath.Join(tmp, "index.html"), file, s.cfg.MaxUpload)
 		if err != nil {
 			os.RemoveAll(tmp)
-			return preparedUpload{}, err
+			return preparedUpload{}, "", nil, 0, err
 		}
 		upload.size, upload.files = size, 1
 	case ".zip":
@@ -150,48 +158,49 @@ func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, defaultTT
 		staged, err := os.CreateTemp(staging, stagingPrefix+"*.zip")
 		if err != nil {
 			os.RemoveAll(tmp)
-			return preparedUpload{}, err
+			return preparedUpload{}, "", nil, 0, err
 		}
 		archivePath := staged.Name()
-		_, err = copyInto(staged, file, s.cfg.MaxUpload)
+		size, err := copyInto(staged, file, s.cfg.MaxUpload)
 		if err != nil {
 			os.RemoveAll(tmp)
 			_ = os.Remove(archivePath)
-			return preparedUpload{}, err
+			return preparedUpload{}, "", nil, 0, err
 		}
 		archive, err := zip.OpenReader(archivePath)
 		if err != nil {
 			os.RemoveAll(tmp)
 			_ = os.Remove(archivePath)
-			return preparedUpload{}, uploadError{400, "INVALID_ARCHIVE", "ZIP archive is invalid."}
+			return preparedUpload{}, "", nil, 0, uploadError{400, "INVALID_ARCHIVE", "ZIP archive is invalid."}
 		}
 		upload.size, upload.files, err = s.extractZIP(archive, tmp)
 		archive.Close()
 		_ = os.Remove(archivePath)
+		_ = size
 		if err != nil {
 			os.RemoveAll(tmp)
-			return preparedUpload{}, err
+			return preparedUpload{}, "", nil, 0, err
 		}
 	default:
 		os.RemoveAll(tmp)
-		return preparedUpload{}, uploadError{400, "UNSUPPORTED_FILE", "Upload a standalone HTML file or ZIP archive."}
+		return preparedUpload{}, "", nil, 0, uploadError{400, "UNSUPPORTED_FILE", "Upload a standalone HTML file or ZIP archive."}
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "index.html")); err != nil {
 		os.RemoveAll(tmp)
-		return preparedUpload{}, uploadError{400, "INDEX_REQUIRED", "Archive must contain index.html at its root."}
+		return preparedUpload{}, "", nil, 0, uploadError{400, "INDEX_REQUIRED", "Archive must contain index.html at its root."}
 	}
 	if err := validatePassiveHTMLTree(tmp); err != nil {
 		os.RemoveAll(tmp)
-		return preparedUpload{}, err
+		return preparedUpload{}, "", nil, 0, err
 	}
-	upload.title = cleanTitle(r.FormValue("title"))
-	if upload.title == "" {
-		upload.title = extractHTMLTitle(filepath.Join(tmp, "index.html"))
+	title := cleanTitle(r.FormValue("title"))
+	if title == "" {
+		title = extractHTMLTitle(filepath.Join(tmp, "index.html"))
 	}
-	if upload.title == "" {
-		upload.title = cleanTitle(strings.TrimSuffix(filepath.Base(header.Filename), filepath.Ext(header.Filename)))
+	if title == "" {
+		title = cleanTitle(strings.TrimSuffix(filepath.Base(header.Filename), filepath.Ext(header.Filename)))
 	}
-	return upload, nil
+	return upload, title, expiresAt, ttl, nil
 }
 
 func copyLimited(path string, source io.Reader, limit int64) (int64, error) {
@@ -251,10 +260,7 @@ func (s *Server) extractZIP(archive *zip.ReadCloser, destination string) (int64,
 			markDirs(seenDirs, clean)
 			continue
 		}
-		if seenFiles[clean] || seenDirs[clean] {
-			return 0, 0, errArchiveCollision
-		}
-		if conflictsWithParent(seenFiles, clean) {
+		if seenFiles[clean] || seenDirs[clean] || conflictsWithParent(seenFiles, clean) {
 			return 0, 0, errArchiveCollision
 		}
 		files++
@@ -305,40 +311,21 @@ func conflictsWithParent(seenFiles map[string]bool, path string) bool {
 
 var activeHTMLTags = map[string]bool{
 	"base":     true,
-	"button":   true,
 	"embed":    true,
 	"form":     true,
 	"frame":    true,
 	"frameset": true,
 	"iframe":   true,
 	"object":   true,
-	"script":   true,
-	"select":   true,
 	"textarea": true,
 }
 
-// passiveInputTypes are the only inputs Seol accepts. Checkboxes and radios
-// hold state entirely in the CSS :checked pseudo-class, so a page can offer
-// choices without scripting. They stay inert under the artifact CSP, which has
-// no allow-forms sandbox token and sets form-action 'none', and <form>,
-// <button>, <select>, and <textarea> remain blocked, so nothing can be
-// submitted anywhere.
-var passiveInputTypes = map[string]bool{"checkbox": true, "radio": true}
-
-func inputViolation(token html.Token) string {
-	kind := "text"
-	for _, attribute := range token.Attr {
-		// Browsers honour the first of a repeated attribute, so matching that
-		// keeps the check aligned with what will actually render.
-		if strings.EqualFold(attribute.Key, "type") {
-			kind = strings.ToLower(strings.TrimSpace(attribute.Val))
-			break
-		}
-	}
-	if passiveInputTypes[kind] {
-		return ""
-	}
-	return `<input type="` + kind + `">`
+var allowedInputTypes = map[string]bool{
+	"button":   true,
+	"checkbox": true,
+	"color":    true,
+	"radio":    true,
+	"range":    true,
 }
 
 func validatePassiveHTMLTree(root string) error {
@@ -357,7 +344,7 @@ func validatePassiveHTMLTree(root string) error {
 			return err
 		} else if reason != "" {
 			relative, _ := filepath.Rel(root, path)
-			return uploadError{400, "ACTIVE_HTML", fmt.Sprintf("%s contains %s; Seol accepts passive HTML only.", filepath.ToSlash(relative), reason)}
+			return uploadError{400, "ACTIVE_HTML", fmt.Sprintf("%s contains %s; Seol accepts contained HTML only.", filepath.ToSlash(relative), reason)}
 		}
 		return nil
 	})
@@ -386,20 +373,27 @@ func passiveHTMLViolation(path string) (string, error) {
 		if activeHTMLTags[tag] {
 			return "<" + tag + ">", nil
 		}
-		if tag == "input" {
-			if reason := inputViolation(token); reason != "" {
-				return reason, nil
-			}
-		}
 		metaRefresh := false
+		inputType := ""
+		scriptType := ""
+		externalScript := false
 		for _, attribute := range token.Attr {
 			name := strings.ToLower(attribute.Key)
 			value := strings.TrimSpace(strings.ToLower(attribute.Val))
-			if strings.HasPrefix(name, "on") {
-				return name + " event handler", nil
+			if tag == "input" && name == "type" {
+				inputType = value
+			}
+			if tag == "script" && name == "type" {
+				scriptType = value
+			}
+			if tag == "script" && (name == "src" || name == "href" || name == "xlink:href") {
+				externalScript = true
 			}
 			if (name == "href" || name == "src" || name == "xlink:href" || name == "action" || name == "formaction") && strings.HasPrefix(value, "javascript:") {
 				return "a javascript: URL", nil
+			}
+			if name == "action" || name == "formaction" {
+				return name + " submission target", nil
 			}
 			if tag == "meta" && name == "http-equiv" && value == "refresh" {
 				metaRefresh = true
@@ -407,6 +401,20 @@ func passiveHTMLViolation(path string) (string, error) {
 		}
 		if metaRefresh {
 			return "a meta refresh", nil
+		}
+		if tag == "input" && !allowedInputTypes[inputType] {
+			if inputType == "" {
+				inputType = "text"
+			}
+			return fmt.Sprintf("<input type=%q>", inputType), nil
+		}
+		if tag == "script" {
+			if externalScript {
+				return "an external <script src>", nil
+			}
+			if scriptType != "" && scriptType != "text/javascript" && scriptType != "application/javascript" {
+				return fmt.Sprintf("<script type=%q>", scriptType), nil
+			}
 		}
 	}
 }
@@ -476,6 +484,21 @@ func extractHTMLTitle(path string) string {
 // zero so an unset configuration value can still fall back to a default.
 const expiryUnlimited = time.Duration(-1)
 
+// ttlSeconds stores an unlimited TTL as -1 so it round-trips through SQLite.
+func ttlSeconds(d time.Duration) int64 {
+	if d == expiryUnlimited {
+		return -1
+	}
+	return int64(d / time.Second)
+}
+
+func ttlDuration(seconds int64) time.Duration {
+	if seconds < 0 {
+		return expiryUnlimited
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func parseExpiry(value string) (time.Duration, error) {
 	value = strings.TrimSpace(strings.ToLower(value))
 	if value == "never" {
@@ -499,21 +522,6 @@ func formatExpiry(d time.Duration) string {
 		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
 	}
 	return d.String()
-}
-
-// ttlSeconds stores an unlimited TTL as -1 so it round-trips through SQLite.
-func ttlSeconds(d time.Duration) int64 {
-	if d == expiryUnlimited {
-		return -1
-	}
-	return int64(d / time.Second)
-}
-
-func ttlDuration(seconds int64) time.Duration {
-	if seconds < 0 {
-		return expiryUnlimited
-	}
-	return time.Duration(seconds) * time.Second
 }
 
 type uploadError struct {

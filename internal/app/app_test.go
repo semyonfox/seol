@@ -239,18 +239,17 @@ func TestUploadServeListDelete(t *testing.T) {
 		t.Fatalf("serve response status=%d headers=%v", resp.StatusCode, resp.Header)
 	}
 	csp := resp.Header.Get("Content-Security-Policy")
-	for _, directive := range []string{"sandbox", "script-src 'none'", "connect-src 'none'", "form-action 'none'", "worker-src 'none'", "frame-ancestors 'none'"} {
+	for _, directive := range []string{"sandbox allow-scripts", "script-src 'unsafe-inline'", "connect-src 'none'", "form-action 'none'", "worker-src 'none'", "frame-ancestors 'none'"} {
 		if !strings.Contains(csp, directive) {
 			t.Fatalf("artifact CSP missing %q: %q", directive, csp)
 		}
 	}
-	for _, forbidden := range []string{"allow-scripts", "allow-same-origin"} {
+	// Inline script may run, but only in an opaque origin with no same-origin
+	// access, no external code, and no network.
+	for _, forbidden := range []string{"allow-same-origin", "allow-forms", "script-src 'self'"} {
 		if strings.Contains(csp, forbidden) {
-			t.Fatalf("artifact sandbox contains forbidden permission %q: %q", forbidden, csp)
+			t.Fatalf("artifact CSP must not contain %q: %q", forbidden, csp)
 		}
-	}
-	if strings.Contains(csp, "script-src 'unsafe-inline'") || strings.Contains(csp, "script-src 'self'") {
-		t.Fatalf("artifact CSP must disable all JavaScript: %q", csp)
 	}
 	resp.Body.Close()
 
@@ -392,14 +391,14 @@ func TestArtifactPolicyFollowsContentType(t *testing.T) {
 	})
 	created := uploadTestFile(t, web.URL, "site.zip", archive, "")
 
-	// Every artifact response carries the policy, not just active document
-	// types, so a content type Seol does not enumerate cannot slip through.
+	// The policy is deliberately withheld from passive types such as PDF: the
+	// sandbox directive blocks the browser's built-in viewer.
 	for _, test := range []struct {
 		path          string
 		contentType   string
 		expectsPolicy bool
 	}{
-		{"plan.pdf", "application/pdf", true},
+		{"plan.pdf", "application/pdf", false},
 		{"diagram.svg", "image/svg+xml", true},
 	} {
 		t.Run(test.path, func(t *testing.T) {
@@ -448,12 +447,12 @@ func TestRejectsActiveHTML(t *testing.T) {
 	defer web.Close()
 
 	tests := map[string]string{
-		"script":       `<h1>Report</h1><script>alert(1)</script>`,
-		"event":        `<h1 onclick="alert(1)">Report</h1>`,
-		"javascript":   `<a href=" javascript:alert(1)">click</a>`,
-		"form":         `<form action="/submit"><input name="secret"></form>`,
-		"meta refresh": `<meta http-equiv="refresh" content="0;url=https://example.com">`,
-		"iframe":       `<iframe src="https://example.com"></iframe>`,
+		"external script": `<script src="https://example.com/x.js"></script>`,
+		"javascript":      `<a href=" javascript:alert(1)">click</a>`,
+		"form action":     `<a formaction="/submit">go</a>`,
+		"form":            `<form action="/submit"><input name="secret"></form>`,
+		"meta refresh":    `<meta http-equiv="refresh" content="0;url=https://example.com">`,
+		"iframe":          `<iframe src="https://example.com"></iframe>`,
 	}
 	for name, document := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -489,7 +488,7 @@ func TestRejectsActiveHTMLAnywhereInZIP(t *testing.T) {
 
 	archive := zipBytes(t, map[string]string{
 		"index.html":         `<h1>Passive index</h1>`,
-		"details/report.htm": `<button>Interactive control</button>`,
+		"details/report.htm": `<iframe src="https://example.com"></iframe>`,
 	})
 	resp := rawUpload(t, web.URL, "site.zip", archive, "")
 	defer resp.Body.Close()
@@ -696,5 +695,91 @@ func TestConfigDefaultExpiryIsOneDay(t *testing.T) {
 	}
 	if cfg.DefaultExpiry != 24*time.Hour {
 		t.Fatalf("default expiry = %s", cfg.DefaultExpiry)
+	}
+}
+
+func TestAllowsContainedPageInteractions(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://test", UploadToken: "test-token", MaxUpload: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	document := []byte(`<h1 id="result">Ready</h1>
+		<button onclick="document.querySelector('#result').textContent='Done'">Run</button>
+		<select onchange="document.querySelector('#result').textContent=this.value"><option>One</option></select>
+		<input type="checkbox" onchange="document.body.dataset.checked=this.checked">
+		<input type="range" oninput="document.body.dataset.value=this.value">
+		<script>document.body.dataset.loaded = "yes"</script>`)
+	resp := rawUpload(t, web.URL, "page.html", document, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestPDFUsesBrowserViewerAndMissingAssetExplainsFailure(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 2 << 20, MaxFiles: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	archive := zipBytes(t, map[string]string{
+		"index.html":  `<a href="plan.pdf">Read the plan</a>`,
+		"plan.pdf":    "%PDF-1.4\n%%EOF",
+		"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg"></svg>`,
+	})
+	created := uploadTestFile(t, web.URL, "site.zip", archive, "")
+
+	resp, err := http.Get(web.URL + "/p/" + created.ID + "/plan.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PDF status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/pdf" {
+		t.Fatalf("PDF content type=%q", got)
+	}
+	if got := resp.Header.Get("Content-Security-Policy"); got != "" {
+		t.Fatalf("PDF must not inherit the HTML sandbox CSP: %q", got)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(web.URL + "/p/" + created.ID + "/diagram.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("SVG status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "image/svg+xml" {
+		t.Fatalf("SVG content type=%q", got)
+	}
+	if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "sandbox allow-scripts") {
+		t.Fatalf("SVG must retain artifact CSP: %q", resp.Header.Get("Content-Security-Policy"))
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(web.URL + "/p/" + created.ID + "/missing.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing asset status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("missing asset content type=%q", got)
+	}
+	if !bytes.Contains(body, []byte("This link is broken")) {
+		t.Fatalf("missing asset response=%q", body)
 	}
 }

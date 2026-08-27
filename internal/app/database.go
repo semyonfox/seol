@@ -23,6 +23,7 @@ type page struct {
 	FileCount      int     `json:"file_count"`
 	ContentVersion int     `json:"content_version"`
 	TTLSeconds     int64   `json:"ttl_seconds"`
+	PublisherID    string  `json:"publisher_id,omitempty"`
 }
 
 func openDatabase(path string) (*sql.DB, error) {
@@ -42,7 +43,8 @@ func openDatabase(path string) (*sql.DB, error) {
 		file_count INTEGER NOT NULL DEFAULT 1,
 		content_version INTEGER NOT NULL DEFAULT 1,
 		ttl_seconds INTEGER NOT NULL DEFAULT 86400,
-		files_removed INTEGER NOT NULL DEFAULT 0
+		files_removed INTEGER NOT NULL DEFAULT 0,
+		publisher_id TEXT NOT NULL DEFAULT ''
 	)`)
 	if err != nil {
 		db.Close()
@@ -72,6 +74,7 @@ func migratePages(db *sql.DB) error {
 		{"content_version", "content_version INTEGER NOT NULL DEFAULT 1"},
 		{"ttl_seconds", "ttl_seconds INTEGER NOT NULL DEFAULT 86400"},
 		{"files_removed", "files_removed INTEGER NOT NULL DEFAULT 0"},
+		{"publisher_id", "publisher_id TEXT NOT NULL DEFAULT ''"},
 	} {
 		if columns[migration.name] {
 			continue
@@ -109,7 +112,7 @@ func pageColumnNames(db *sql.DB) (map[string]bool, error) {
 func (s *Server) scanPage(scanner interface{ Scan(...any) error }) (page, error) {
 	var p page
 	var expires sql.NullString
-	err := scanner.Scan(&p.ID, &p.Title, &p.Status, &p.CreatedAt, &p.UpdatedAt, &expires, &p.SizeBytes, &p.FileCount, &p.ContentVersion, &p.TTLSeconds)
+	err := scanner.Scan(&p.ID, &p.Title, &p.Status, &p.CreatedAt, &p.UpdatedAt, &expires, &p.SizeBytes, &p.FileCount, &p.ContentVersion, &p.TTLSeconds, &p.PublisherID)
 	if expires.Valid {
 		p.ExpiresAt = &expires.String
 	}
@@ -117,7 +120,7 @@ func (s *Server) scanPage(scanner interface{ Scan(...any) error }) (page, error)
 	return p, err
 }
 
-const pageColumns = `id, title, status, created_at, updated_at, expires_at, size_bytes, file_count, content_version, ttl_seconds`
+const pageColumns = `id, title, status, created_at, updated_at, expires_at, size_bytes, file_count, content_version, ttl_seconds, publisher_id`
 
 func (s *Server) getPageRecord(id string) (page, error) {
 	return s.scanPage(s.db.QueryRow(`SELECT `+pageColumns+` FROM pages WHERE id = ?`, id))

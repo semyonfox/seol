@@ -12,6 +12,7 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Seol is a temporary pastebin for static sites and agent-made artifacts. Publish a page and get a shareable link.">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <title>Seol — temporary links for static sites</title>
   <style>
     :root { color-scheme: light; --paper:#faf7f2; --ink:#201d19; --muted:#6d655c; --line:#ddd5ca; --panel:#f1ece4; --accent:#b84c20; }
@@ -25,6 +26,8 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
     h1 { margin:.25rem 0 .75rem; font-size:clamp(3.4rem, 12vw, 6.6rem); }
     h2 { margin:0 0 1rem; font-size:1.5rem; }
     p { margin:.6rem 0; }
+    .masthead { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; margin-bottom:.25rem; }
+    .site-logo { width:clamp(3.5rem, 9vw, 4.5rem); height:auto; flex:none; }
     .eyebrow { margin:0; color:var(--accent); font-size:.78rem; font-weight:750; letter-spacing:.12em; text-transform:uppercase; }
     .tagline { max-width:38rem; margin:0; font-size:clamp(1.45rem, 4vw, 2rem); line-height:1.35; }
     .intro { max-width:40rem; margin-top:1.25rem; color:var(--muted); font-size:1.05rem; }
@@ -54,7 +57,7 @@ var landingPageTemplate = template.Must(template.New("landing").Parse(`<!doctype
 <body>
 <main>
   <header>
-    <p class="eyebrow">Temporary static hosting</p>
+    <div class="masthead"><p class="eyebrow">Temporary static hosting</p><img class="site-logo" src="/logo.svg" alt=""></div>
     <h1>Seol</h1>
     <p class="tagline">A pastebin for static sites. Publish a page, get a link, share it, and let it disappear.</p>
     <p class="intro">Seol is the quick handoff between a generated artifact and the person who needs to see it. Give the command to a coding agent—or run it yourself—to share reports, dashboards, diagrams, demos, and docs without setting up a deployment.</p>
@@ -151,4 +154,12 @@ func (s *Server) landingPage(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = page.WriteTo(w)
+}
+
+func serveBrandAsset(data []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		_, _ = w.Write(data)
+	}
 }
