@@ -143,8 +143,13 @@ seol publish ./report-site
 # Deliberately create a separate public URL
 seol publish --new ./report-site
 
+# Never expire; requires the server to run with SEOL_MAX_EXPIRY=never
+seol publish --expires never ./report-site
+
 # Manage pages
 seol list
+# See local metadata for pages published from this machine, including source paths
+seol history
 seol stats
 seol info PAGE_ID
 seol replace PAGE_ID ./updated-report
@@ -169,6 +174,9 @@ Pages expire after one day by default. Supported expiration values include
 `1h`, `1d`, and `7d`; seven days is the maximum. A successful replacement
 refreshes the page from that moment using its selected lifetime. Seol retains
 only the current content; temporary handoff hosting has no version history.
+The CLI keeps a local metadata-only publishing history (page URL, ID, expiry,
+and source path) so you can find the original artifact again after its link
+expires. It never copies uploaded content into that history.
 
 ## AI-agent instruction
 
@@ -209,19 +217,63 @@ Uploaded pages are arbitrary untrusted content. Seol permits inline JavaScript
 inside an opaque-origin CSP sandbox while blocking storage, cookies, external
 network connections, external scripts, forms, framing, workers, popups,
 navigation, and programmatic clipboard access. Normal text selection and the
-browser's copy command still work. A separate content domain remains useful
+browser's copy command still work. Request logs redact page identifiers, since
+the identifier is what grants access to a page. A separate content domain remains useful
 defence in depth but is not required for this contained-interaction model.
 Never place authentication cookies on the content hostname. Seol itself uses
 bearer headers and does not set cookies. Enable trusted proxy headers only when
 the origin is private and every public request reaches it through the
 Cloudflare Tunnel.
 
+## Interactive choices
+
+A published page cannot submit a form or reach the network, so it cannot send an
+answer back. It can still *ask* one, and it does not need JavaScript to do so:
+radio and checkbox inputs change the CSS `:checked` state, and a sibling
+selector can reveal a different block of text for each selection. The same
+pattern works in a page that uses no script at all.
+
+The pattern that makes this useful for agent handoffs is a page that renders a
+copy-pasteable JSON block reflecting the current selection:
+
+```html
+<input class="picker" type="radio" name="tone" id="tone-formal" checked>
+<input class="picker" type="radio" name="tone" id="tone-casual">
+
+<main class="card">
+  <label for="tone-formal">Formal</label>
+  <label for="tone-casual">Casual</label>
+<pre>{
+  "tone": "<span class="v v-tone-formal">formal</span><span class="v v-tone-casual">casual</span>"
+}</pre>
+</main>
+```
+
+```css
+.picker { position:absolute; width:1px; height:1px; opacity:0; }
+.v { display: none; }
+#tone-formal:checked ~ .card .v-tone-formal,
+#tone-casual:checked ~ .card .v-tone-casual { display: inline; }
+```
+
+The unselected values are `display:none`, so selecting the block copies only the
+chosen answer. The reader picks their options and pastes the JSON back into the
+conversation. Nothing is downloaded, stored, or sent to a server.
+
+Two structural requirements: every input must appear *before* the output block
+in the document, because `~` only matches following siblings; and each group
+needs one `checked` default so the JSON is always complete.
+
+`examples/choices/index.html` is a complete working page with three questions.
+Publish it with `seol publish examples/choices/index.html`.
+
 ### Live instance
 
 The personal instance is available at
 [seol.semyon.ie](https://seol.semyon.ie). It uses Cloudflare Tunnel,
 keeps page data in the `seol-data` Docker volume, and requires its configured
-token for publishing and management:
+token for publishing and management. The CLI talks to this instance unless you
+configure another, so a self-hosted deployment needs one setup step:
 
 ```bash
 seol configure --server https://seol.semyon.ie --token TOKEN

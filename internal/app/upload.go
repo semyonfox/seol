@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -51,7 +52,7 @@ func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 	if expiresAt != nil {
 		expiry = expiresAt.UTC().Format(time.RFC3339)
 	}
-	_, err = s.db.Exec(`INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds,publisher_id) VALUES(?,?,'active',?,?,?,?,?,1,?,?)`, id, title, now, now, expiry, upload.size, upload.files, int64(ttl/time.Second), publisherID(s.cfg.UploadToken))
+	_, err = s.db.Exec(`INSERT INTO pages(id,title,status,created_at,updated_at,expires_at,size_bytes,file_count,content_version,ttl_seconds,publisher_id) VALUES(?,?,'active',?,?,?,?,?,1,?,?)`, id, title, now, now, expiry, upload.size, upload.files, ttlSeconds(ttl), publisherID(s.cfg.UploadToken))
 	if err != nil {
 		_ = os.RemoveAll(root)
 		writeError(w, 500, "INTERNAL", "Could not record page.")
@@ -64,7 +65,7 @@ func (s *Server) createPage(w http.ResponseWriter, r *http.Request) {
 func (s *Server) replacePage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	current, err := s.getPageRecord(id)
-	if errors.Is(err, sql.ErrNoRows) || current.Status != "active" {
+	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, 404, "NOT_FOUND", "Active page not found.")
 		return
 	}
@@ -72,7 +73,15 @@ func (s *Server) replacePage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "INTERNAL", "Could not read page.")
 		return
 	}
-	ttl := time.Duration(current.TTLSeconds) * time.Second
+	if current.Status != "active" {
+		writeError(w, 404, "NOT_FOUND", "Active page not found.")
+		return
+	}
+	if err != nil {
+		writeError(w, 500, "INTERNAL", "Could not read page.")
+		return
+	}
+	ttl := ttlDuration(current.TTLSeconds)
 	upload, title, _, requestedTTL, err := s.receiveUpload(w, r, ttl)
 	if err != nil {
 		writeUploadError(w, err)
@@ -86,14 +95,17 @@ func (s *Server) replacePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	if requestedTTL > 0 {
+	if requestedTTL != 0 {
 		ttl = requestedTTL
 	}
-	expiresAt := time.Now().UTC().Add(ttl).Format(time.RFC3339)
+	var expiresAt any
+	if ttl != expiryUnlimited {
+		expiresAt = time.Now().UTC().Add(ttl).Format(time.RFC3339)
+	}
 	if title == "" {
 		title = current.Title
 	}
-	result, err := s.db.Exec(`UPDATE pages SET title=?,updated_at=?,expires_at=?,size_bytes=?,file_count=?,content_version=?,ttl_seconds=? WHERE id=? AND content_version=? AND status='active'`, title, now, expiresAt, upload.size, upload.files, version, int64(ttl/time.Second), id, current.ContentVersion)
+	result, err := s.db.Exec(`UPDATE pages SET title=?,updated_at=?,expires_at=?,size_bytes=?,file_count=?,content_version=?,ttl_seconds=? WHERE id=? AND content_version=? AND status='active'`, title, now, expiresAt, upload.size, upload.files, version, ttlSeconds(ttl), id, current.ContentVersion)
 	if err != nil {
 		_ = os.RemoveAll(final)
 		writeError(w, 500, "INTERNAL", "Could not record replacement.")
@@ -125,7 +137,8 @@ func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, defaultTT
 	if err != nil {
 		return preparedUpload{}, "", nil, 0, uploadError{400, "INVALID_EXPIRY", err.Error()}
 	}
-	tmp, err := os.MkdirTemp(filepath.Join(s.cfg.DataDir, "pages"), ".upload-")
+	staging := filepath.Join(s.cfg.DataDir, "pages")
+	tmp, err := os.MkdirTemp(staging, stagingPrefix)
 	if err != nil {
 		return preparedUpload{}, "", nil, 0, err
 	}
@@ -140,15 +153,24 @@ func (s *Server) receiveUpload(w http.ResponseWriter, r *http.Request, defaultTT
 		}
 		upload.size, upload.files = size, 1
 	case ".zip":
-		archivePath := filepath.Join(tmp, ".upload.zip")
-		size, err := copyLimited(archivePath, file, s.cfg.MaxUpload)
+		// The archive is staged alongside the extraction directory rather than
+		// inside it, so an entry cannot collide with the staging file.
+		staged, err := os.CreateTemp(staging, stagingPrefix+"*.zip")
 		if err != nil {
 			os.RemoveAll(tmp)
+			return preparedUpload{}, "", nil, 0, err
+		}
+		archivePath := staged.Name()
+		size, err := copyInto(staged, file, s.cfg.MaxUpload)
+		if err != nil {
+			os.RemoveAll(tmp)
+			_ = os.Remove(archivePath)
 			return preparedUpload{}, "", nil, 0, err
 		}
 		archive, err := zip.OpenReader(archivePath)
 		if err != nil {
 			os.RemoveAll(tmp)
+			_ = os.Remove(archivePath)
 			return preparedUpload{}, "", nil, 0, uploadError{400, "INVALID_ARCHIVE", "ZIP archive is invalid."}
 		}
 		upload.size, upload.files, err = s.extractZIP(archive, tmp)
@@ -186,6 +208,10 @@ func copyLimited(path string, source io.Reader, limit int64) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	return copyInto(out, source, limit)
+}
+
+func copyInto(out *os.File, source io.Reader, limit int64) (int64, error) {
 	size, copyErr := io.Copy(out, io.LimitReader(source, limit+1))
 	closeErr := out.Close()
 	if copyErr != nil || closeErr != nil {
@@ -200,6 +226,10 @@ func copyLimited(path string, source io.Reader, limit int64) (int64, error) {
 func (s *Server) extractZIP(archive *zip.ReadCloser, destination string) (int64, int, error) {
 	var total int64
 	files, entries := 0, 0
+	// A ZIP may legally repeat a name, and a name may collide with a directory
+	// created for another entry. Both are client errors, not server faults.
+	seenFiles := make(map[string]bool)
+	seenDirs := make(map[string]bool)
 	for _, entry := range archive.File {
 		entries++
 		if entries > s.cfg.MaxFiles {
@@ -221,10 +251,17 @@ func (s *Server) extractZIP(archive *zip.ReadCloser, destination string) (int64,
 		}
 		target := filepath.Join(destination, clean)
 		if entry.FileInfo().IsDir() {
+			if seenFiles[clean] {
+				return 0, 0, errArchiveCollision
+			}
 			if err := os.MkdirAll(target, 0o750); err != nil {
 				return 0, 0, err
 			}
+			markDirs(seenDirs, clean)
 			continue
+		}
+		if seenFiles[clean] || seenDirs[clean] || conflictsWithParent(seenFiles, clean) {
+			return 0, 0, errArchiveCollision
 		}
 		files++
 		if entry.UncompressedSize64 > uint64(s.cfg.MaxExtracted) || total+int64(entry.UncompressedSize64) > s.cfg.MaxExtracted {
@@ -240,11 +277,36 @@ func (s *Server) extractZIP(archive *zip.ReadCloser, destination string) (int64,
 		size, err := copyLimited(target, source, s.cfg.MaxExtracted-total)
 		source.Close()
 		if err != nil {
+			if errors.Is(err, fs.ErrExist) {
+				return 0, 0, errArchiveCollision
+			}
 			return 0, 0, err
 		}
+		seenFiles[clean] = true
+		markDirs(seenDirs, filepath.Dir(clean))
 		total += size
 	}
 	return total, files, nil
+}
+
+var errArchiveCollision = uploadError{400, "UNSAFE_ARCHIVE", "Archive contains duplicate or colliding entry names."}
+
+// markDirs records a path and each of its ancestors as directories.
+func markDirs(seen map[string]bool, path string) {
+	for path != "." && path != string(filepath.Separator) {
+		seen[path] = true
+		path = filepath.Dir(path)
+	}
+}
+
+// conflictsWithParent reports whether an ancestor of path was written as a file.
+func conflictsWithParent(seenFiles map[string]bool, path string) bool {
+	for parent := filepath.Dir(path); parent != "." && parent != string(filepath.Separator); parent = filepath.Dir(parent) {
+		if seenFiles[parent] {
+			return true
+		}
+	}
+	return false
 }
 
 var activeHTMLTags = map[string]bool{
@@ -362,16 +424,16 @@ func (s *Server) expiryFromForm(value string, defaultTTL time.Duration) (*time.T
 		value = formatExpiry(defaultTTL)
 	}
 	if strings.EqualFold(value, "never") {
-		if s.cfg.MaxExpiry > 0 {
+		if s.cfg.MaxExpiry != expiryUnlimited {
 			return nil, 0, fmt.Errorf("expiry must not exceed %s", formatExpiry(s.cfg.MaxExpiry))
 		}
-		return nil, 0, nil
+		return nil, expiryUnlimited, nil
 	}
 	duration, err := parseExpiry(value)
 	if err != nil || duration <= 0 {
 		return nil, 0, fmt.Errorf("use an expiry such as 1h, 1d, or 7d")
 	}
-	if s.cfg.MaxExpiry > 0 && duration > s.cfg.MaxExpiry {
+	if s.cfg.MaxExpiry != expiryUnlimited && duration > s.cfg.MaxExpiry {
 		return nil, 0, fmt.Errorf("expiry exceeds maximum of %s", formatExpiry(s.cfg.MaxExpiry))
 	}
 	t := time.Now().UTC().Add(duration)
@@ -418,10 +480,29 @@ func extractHTMLTitle(path string) string {
 	}
 }
 
+// expiryUnlimited marks "never expires". It is a distinct sentinel rather than
+// zero so an unset configuration value can still fall back to a default.
+const expiryUnlimited = time.Duration(-1)
+
+// ttlSeconds stores an unlimited TTL as -1 so it round-trips through SQLite.
+func ttlSeconds(d time.Duration) int64 {
+	if d == expiryUnlimited {
+		return -1
+	}
+	return int64(d / time.Second)
+}
+
+func ttlDuration(seconds int64) time.Duration {
+	if seconds < 0 {
+		return expiryUnlimited
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func parseExpiry(value string) (time.Duration, error) {
 	value = strings.TrimSpace(strings.ToLower(value))
 	if value == "never" {
-		return 0, nil
+		return expiryUnlimited, nil
 	}
 	if strings.HasSuffix(value, "d") {
 		days, err := time.ParseDuration(strings.TrimSuffix(value, "d") + "h")
@@ -434,6 +515,9 @@ func parseExpiry(value string) (time.Duration, error) {
 }
 
 func formatExpiry(d time.Duration) string {
+	if d == expiryUnlimited {
+		return "never"
+	}
 	if d%(24*time.Hour) == 0 {
 		return fmt.Sprintf("%dd", int(d/(24*time.Hour)))
 	}

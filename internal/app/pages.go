@@ -67,6 +67,10 @@ func (s *Server) listPages(w http.ResponseWriter, r *http.Request) {
 		}
 		pages = append(pages, p)
 	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "Could not list pages.")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"pages": pages})
 }
 
@@ -90,27 +94,35 @@ func (s *Server) deletePage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "INTERNAL", "Could not delete page.")
 		return
 	}
-	count, _ := result.RowsAffected()
+	count, err := result.RowsAffected()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "Could not delete page.")
+		return
+	}
 	if count == 0 {
 		var exists int
-		if s.db.QueryRow(`SELECT 1 FROM pages WHERE id=?`, id).Scan(&exists) != nil {
+		if s.db.QueryRowContext(r.Context(), `SELECT 1 FROM pages WHERE id=?`, id).Scan(&exists) != nil {
 			writeError(w, 404, "NOT_FOUND", "Page not found.")
 			return
 		}
 	}
-	_ = removePageFiles(s.cfg.DataDir, id)
+	s.reclaimPageFiles(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	current, err := s.getPageRecord(id)
-	if errors.Is(err, sql.ErrNoRows) || current.Status != "active" {
+	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Active page not found.")
 		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "Could not read page.")
+		return
+	}
+	if current.Status != "active" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Active page not found.")
 		return
 	}
 	var request struct {
@@ -122,7 +134,7 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", "Provide expires_in as JSON.")
 		return
 	}
-	expiresAt, ttl, err := s.expiryFromForm(request.ExpiresIn, time.Duration(current.TTLSeconds)*time.Second)
+	expiresAt, ttl, err := s.expiryFromForm(request.ExpiresIn, ttlDuration(current.TTLSeconds))
 	if err != nil || expiresAt == nil {
 		message := "Expiry must be between one hour and seven days."
 		if err != nil {
@@ -132,12 +144,15 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = s.db.ExecContext(r.Context(), `UPDATE pages SET updated_at=?,expires_at=?,ttl_seconds=? WHERE id=? AND status='active'`, now, expiresAt.UTC().Format(time.RFC3339), int64(ttl/time.Second), id)
+	updated, err := s.scanPage(s.db.QueryRowContext(r.Context(), `UPDATE pages SET updated_at=?,expires_at=?,ttl_seconds=? WHERE id=? AND status='active' RETURNING `+pageColumns, now, expiresAt.UTC().Format(time.RFC3339), ttlSeconds(ttl), id))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusConflict, "CONFLICT", "Page changed while updating expiry; retry.")
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "Could not update expiry.")
 		return
 	}
-	updated, _ := s.getPageRecord(id)
 	writeJSON(w, http.StatusOK, updated)
 }
 
@@ -178,8 +193,9 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 	}
 	if p.Status == "expired" || isExpired(p.ExpiresAt) {
 		if p.Status == "active" {
-			_, _ = s.db.Exec(`UPDATE pages SET status='expired' WHERE id=?`, id)
-			_ = removePageFiles(s.cfg.DataDir, id)
+			if _, err := s.db.Exec(`UPDATE pages SET status='expired' WHERE id=?`, id); err == nil {
+				s.reclaimPageFiles(id)
+			}
 		}
 		writeGonePage(w)
 		return
@@ -229,11 +245,20 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 
 func setArtifactCommonHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
-	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	// The artifact CSP sets a sandbox directive, which gives the page an opaque
+	// origin. A same-origin resource policy would then reject the page's own
+	// stylesheets, images, and fonts as cross-origin. Artifacts are public to
+	// anyone holding the unguessable URL, so a cross-origin policy grants no
+	// additional access.
+	w.Header().Set("Cross-Origin-Resource-Policy", "cross-origin")
 	w.Header().Set("Permissions-Policy", "accelerometer=(), autoplay=(), camera=(), clipboard-read=(), clipboard-write=(), display-capture=(), encrypted-media=(), fullscreen=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), web-share=(), xr-spatial-tracking=()")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 }
 
+// setArtifactContentPolicy applies the artifact CSP only to types the browser
+// renders as an active document. A passive type such as application/pdf is
+// deliberately left without it, because the sandbox directive blocks the
+// browser's built-in viewer.
 func setArtifactContentPolicy(w http.ResponseWriter, contentType string) {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil {

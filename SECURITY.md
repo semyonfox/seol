@@ -17,6 +17,14 @@ substitute for authentication.
   Inline CSS and classic inline JavaScript work, while storage, cookies,
   external scripts, external connections, forms, framing, workers, popups,
   navigation, active embeds, and programmatic clipboard access are blocked.
+- Artifacts are served with `Cross-Origin-Resource-Policy: cross-origin`. The
+  sandbox gives each page an opaque origin, so a same-origin policy would block
+  the page's own stylesheets and images. Artifacts are readable by anyone
+  holding the unguessable URL, so this grants no additional access.
+- The policy is withheld from passive types such as `application/pdf`, whose
+  built-in browser viewer the sandbox directive would otherwise block.
+- Request logs redact page identifiers. A page ID is the capability that grants
+  access to the page and must not reach a log.
 - Use a dedicated content hostname with no sensitive cookies.
 - Never scope API or administration cookies to a parent domain shared with the
   content hostname.

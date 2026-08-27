@@ -22,6 +22,17 @@ import (
 
 var version = "dev"
 
+const (
+	defaultMaxUpload        = 10 << 20
+	defaultMaxExtracted     = 50 << 20
+	defaultMaxFiles         = 100
+	defaultUploadsPerMinute = 5
+	defaultMaxConcurrent    = 2
+	defaultExpiry           = 24 * time.Hour
+	defaultMaxExpiry        = 7 * 24 * time.Hour
+	defaultCleanupInterval  = time.Minute
+)
+
 type Config struct {
 	ListenAddr        string
 	DataDir           string
@@ -42,25 +53,41 @@ func Version() string { return version }
 
 func ConfigFromEnv() (Config, error) {
 	c := Config{
-		ListenAddr:       env("SEOL_LISTEN_ADDR", ":8080"),
-		DataDir:          env("SEOL_DATA_DIR", "./data"),
-		PublicBaseURL:    strings.TrimRight(env("SEOL_PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
-		UploadToken:      os.Getenv("SEOL_TOKEN"),
-		MaxUpload:        envInt64("SEOL_MAX_UPLOAD_BYTES", 10<<20),
-		MaxExtracted:     envInt64("SEOL_MAX_EXTRACTED_BYTES", 50<<20),
-		MaxFiles:         int(envInt64("SEOL_MAX_FILES", 100)),
-		UploadsPerMinute: int(envInt64("SEOL_UPLOADS_PER_MINUTE", 5)),
-		MaxConcurrent:    int(envInt64("SEOL_MAX_CONCURRENT_UPLOADS", 2)),
-		CleanupInterval:  time.Minute,
+		ListenAddr:      env("SEOL_LISTEN_ADDR", ":8080"),
+		DataDir:         env("SEOL_DATA_DIR", "./data"),
+		PublicBaseURL:   strings.TrimRight(env("SEOL_PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
+		UploadToken:     os.Getenv("SEOL_TOKEN"),
+		CleanupInterval: defaultCleanupInterval,
 	}
 	var err error
+	if c.MaxUpload, err = envInt64("SEOL_MAX_UPLOAD_BYTES", defaultMaxUpload); err != nil {
+		return Config{}, err
+	}
+	if c.MaxExtracted, err = envInt64("SEOL_MAX_EXTRACTED_BYTES", defaultMaxExtracted); err != nil {
+		return Config{}, err
+	}
+	maxFiles, err := envInt64("SEOL_MAX_FILES", defaultMaxFiles)
+	if err != nil {
+		return Config{}, err
+	}
+	uploadsPerMinute, err := envInt64("SEOL_UPLOADS_PER_MINUTE", defaultUploadsPerMinute)
+	if err != nil {
+		return Config{}, err
+	}
+	maxConcurrent, err := envInt64("SEOL_MAX_CONCURRENT_UPLOADS", defaultMaxConcurrent)
+	if err != nil {
+		return Config{}, err
+	}
+	c.MaxFiles = int(maxFiles)
+	c.UploadsPerMinute = int(uploadsPerMinute)
+	c.MaxConcurrent = int(maxConcurrent)
 	if c.TrustProxyHeaders, err = envBool("SEOL_TRUST_PROXY_HEADERS", false); err != nil {
 		return Config{}, err
 	}
-	if c.DefaultExpiry, err = parseExpiry(env("SEOL_DEFAULT_EXPIRY", "1d")); err != nil {
+	if c.DefaultExpiry, err = parseExpiry(env("SEOL_DEFAULT_EXPIRY", formatExpiry(defaultExpiry))); err != nil {
 		return Config{}, fmt.Errorf("SEOL_DEFAULT_EXPIRY: %w", err)
 	}
-	if c.MaxExpiry, err = parseExpiry(env("SEOL_MAX_EXPIRY", "7d")); err != nil {
+	if c.MaxExpiry, err = parseExpiry(env("SEOL_MAX_EXPIRY", formatExpiry(defaultMaxExpiry))); err != nil {
 		return Config{}, fmt.Errorf("SEOL_MAX_EXPIRY: %w", err)
 	}
 	if c.UploadToken == "" {
@@ -69,8 +96,8 @@ func ConfigFromEnv() (Config, error) {
 	if len(c.UploadToken) < 32 {
 		return Config{}, errors.New("SEOL_TOKEN must be at least 32 characters")
 	}
-	if c.MaxUpload <= 0 || c.MaxExtracted <= 0 || c.MaxFiles <= 0 || c.UploadsPerMinute <= 0 || c.MaxConcurrent <= 0 {
-		return Config{}, errors.New("upload limits must be positive")
+	if err := validateUploadLimits(c); err != nil {
+		return Config{}, err
 	}
 	return c, nil
 }
@@ -82,16 +109,16 @@ func env(name, fallback string) string {
 	return fallback
 }
 
-func envInt64(name string, fallback int64) int64 {
+func envInt64(name string, fallback int64) (int64, error) {
 	value := os.Getenv(name)
 	if value == "" {
-		return fallback
+		return fallback, nil
 	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
-		return fallback
+		return 0, fmt.Errorf("%s: use an integer", name)
 	}
-	return parsed
+	return parsed, nil
 }
 
 func envBool(name string, fallback bool) (bool, error) {
@@ -115,32 +142,9 @@ type Server struct {
 }
 
 func New(cfg Config) (*Server, error) {
-	if cfg.MaxUpload == 0 {
-		cfg.MaxUpload = 10 << 20
-	}
-	if cfg.MaxExtracted == 0 {
-		cfg.MaxExtracted = 50 << 20
-	}
-	if cfg.MaxFiles == 0 {
-		cfg.MaxFiles = 100
-	}
-	if cfg.UploadsPerMinute == 0 {
-		cfg.UploadsPerMinute = 5
-	}
-	if cfg.MaxConcurrent == 0 {
-		cfg.MaxConcurrent = 2
-	}
-	if cfg.DefaultExpiry == 0 {
-		cfg.DefaultExpiry = 24 * time.Hour
-	}
-	if cfg.MaxExpiry == 0 {
-		cfg.MaxExpiry = 7 * 24 * time.Hour
-	}
-	if cfg.DefaultExpiry <= 0 || cfg.MaxExpiry < 0 || (cfg.MaxExpiry > 0 && cfg.DefaultExpiry > cfg.MaxExpiry) {
-		return nil, errors.New("default expiry must be positive and not exceed maximum expiry")
-	}
-	if cfg.CleanupInterval == 0 {
-		cfg.CleanupInterval = time.Minute
+	cfg = configWithDefaults(cfg)
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
 	}
 	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "pages"), 0o750); err != nil {
 		return nil, fmt.Errorf("create data directory: %w", err)
@@ -164,7 +168,7 @@ func New(cfg Config) (*Server, error) {
 	mux.HandleFunc("GET /api/v1/pages", s.auth(s.listPages))
 	mux.HandleFunc("GET /api/v1/stats", s.auth(s.getStats))
 	mux.HandleFunc("GET /api/v1/pages/{id}", s.auth(s.getPage))
-	mux.HandleFunc("PUT /api/v1/pages/{id}/content", s.auth(s.limitUploadConcurrency(s.replacePage)))
+	mux.HandleFunc("PUT /api/v1/pages/{id}/content", s.auth(s.limitUploads(s.limitUploadConcurrency(s.replacePage))))
 	mux.HandleFunc("PATCH /api/v1/pages/{id}", s.auth(s.updatePage))
 	mux.HandleFunc("DELETE /api/v1/pages/{id}", s.auth(s.deletePage))
 	mux.HandleFunc("GET /p/{id}/{path...}", s.servePage)
@@ -175,6 +179,65 @@ func New(cfg Config) (*Server, error) {
 		MaxHeaderBytes: 1 << 20,
 	}
 	return s, nil
+}
+
+func configWithDefaults(cfg Config) Config {
+	if cfg.MaxUpload == 0 {
+		cfg.MaxUpload = defaultMaxUpload
+	}
+	if cfg.MaxExtracted == 0 {
+		cfg.MaxExtracted = defaultMaxExtracted
+	}
+	if cfg.MaxFiles == 0 {
+		cfg.MaxFiles = defaultMaxFiles
+	}
+	if cfg.UploadsPerMinute == 0 {
+		cfg.UploadsPerMinute = defaultUploadsPerMinute
+	}
+	if cfg.MaxConcurrent == 0 {
+		cfg.MaxConcurrent = defaultMaxConcurrent
+	}
+	// Zero means "unset" here; expiryUnlimited is the explicit "never" sentinel
+	// and must survive defaulting.
+	if cfg.DefaultExpiry == 0 {
+		cfg.DefaultExpiry = defaultExpiry
+	}
+	if cfg.MaxExpiry == 0 {
+		cfg.MaxExpiry = defaultMaxExpiry
+	}
+	if cfg.CleanupInterval == 0 {
+		cfg.CleanupInterval = defaultCleanupInterval
+	}
+	return cfg
+}
+
+func validateConfig(cfg Config) error {
+	if err := validateUploadLimits(cfg); err != nil {
+		return err
+	}
+	if cfg.MaxExpiry != expiryUnlimited && cfg.MaxExpiry <= 0 {
+		return errors.New("maximum expiry must be positive or never")
+	}
+	if cfg.DefaultExpiry == expiryUnlimited {
+		if cfg.MaxExpiry != expiryUnlimited {
+			return errors.New("default expiry of never requires a maximum expiry of never")
+		}
+		return nil
+	}
+	if cfg.DefaultExpiry <= 0 {
+		return errors.New("default expiry must be positive or never")
+	}
+	if cfg.MaxExpiry != expiryUnlimited && cfg.DefaultExpiry > cfg.MaxExpiry {
+		return errors.New("default expiry must not exceed maximum expiry")
+	}
+	return nil
+}
+
+func validateUploadLimits(cfg Config) error {
+	if cfg.MaxUpload <= 0 || cfg.MaxExtracted <= 0 || cfg.MaxFiles <= 0 || cfg.UploadsPerMinute <= 0 || cfg.MaxConcurrent <= 0 {
+		return errors.New("upload limits must be positive")
+	}
+	return nil
 }
 
 func (s *Server) Close() error { return s.db.Close() }
@@ -249,8 +312,28 @@ func logging(next http.Handler) http.Handler {
 		start := time.Now()
 		rw := &responseWriter{ResponseWriter: w, status: 200}
 		next.ServeHTTP(rw, r)
-		slog.Info("request", "method", r.Method, "path", r.URL.Path, "status", rw.status, "duration_ms", time.Since(start).Milliseconds())
+		slog.Info("request", "method", r.Method, "path", redactPagePath(r.URL.Path), "status", rw.status, "duration_ms", time.Since(start).Milliseconds())
 	})
+}
+
+// redactedID replaces a page identifier in log output.
+const redactedID = "[id]"
+
+// redactPagePath strips page identifiers from a request path before it is
+// logged. A page ID is the capability that grants access to the page, so
+// writing one to the request log would leak the page to anyone who can read
+// logs. The surrounding path is kept so routes remain debuggable.
+func redactPagePath(path string) string {
+	segments := strings.Split(path, "/")
+	for i := 1; i < len(segments); i++ {
+		if segments[i-1] != "p" && segments[i-1] != "pages" {
+			continue
+		}
+		if validID(segments[i]) {
+			segments[i] = redactedID
+		}
+	}
+	return strings.Join(segments, "/")
 }
 
 func securityHeaders(next http.Handler) http.Handler {

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pick your options</title>
+<style>
+  :root { color-scheme: light; --paper:#faf7f2; --ink:#201d19; --muted:#6d655c; --line:#ddd5ca; --panel:#f1ece4; --accent:#b84c20; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--paper); color:var(--ink); font:17px/1.6 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+  .card { width:min(40rem,calc(100% - 2rem)); margin:4rem auto; }
+  h1 { margin:0 0 .4rem; font-size:clamp(2.2rem,7vw,3.4rem); letter-spacing:-.035em; line-height:1.05; }
+  .lede { margin:0 0 2.5rem; color:var(--muted); }
+  fieldset { margin:0 0 1.75rem; padding:0; border:0; }
+  legend { padding:0; margin-bottom:.6rem; font-weight:700; font-size:.95rem; }
+  .options { display:flex; flex-wrap:wrap; gap:.5rem; }
+  label { padding:.45rem .85rem; border:1px solid var(--line); border-radius:999px; background:var(--panel); color:var(--muted); cursor:pointer; font-size:.92rem; user-select:none; }
+  label:hover { border-color:var(--accent); color:var(--ink); }
+
+  /* Inputs sit before .card in the DOM so :checked can reach it with ~ */
+  .picker { position:absolute; width:1px; height:1px; opacity:0; }
+  .picker:focus-visible ~ .card label[for] { outline:none; }
+
+  h2 { margin:2.5rem 0 .5rem; font-size:1.05rem; }
+  pre { margin:0; padding:1.1rem 1.2rem; border:1px solid var(--line); border-radius:.45rem; background:var(--panel); font:.9rem/1.7 ui-monospace,SFMono-Regular,Consolas,monospace; overflow-x:auto; }
+  .v { display:none; }
+  .hint { margin:.7rem 0 0; color:var(--muted); font-size:.88rem; }
+
+  /* Selected pill styling */
+  #tone-formal:checked   ~ .card label[for="tone-formal"],
+  #tone-casual:checked   ~ .card label[for="tone-casual"],
+  #tone-terse:checked    ~ .card label[for="tone-terse"],
+  #depth-summary:checked ~ .card label[for="depth-summary"],
+  #depth-full:checked    ~ .card label[for="depth-full"],
+  #tests-yes:checked     ~ .card label[for="tests-yes"]
+    { background:var(--ink); border-color:var(--ink); color:var(--paper); }
+
+  /* Reveal exactly one value per group inside the JSON block */
+  #tone-formal:checked   ~ .card .v-tone-formal,
+  #tone-casual:checked   ~ .card .v-tone-casual,
+  #tone-terse:checked    ~ .card .v-tone-terse,
+  #depth-summary:checked ~ .card .v-depth-summary,
+  #depth-full:checked    ~ .card .v-depth-full,
+  #tests-yes:checked     ~ .card .v-tests-true,
+  #tests-yes:not(:checked) ~ .card .v-tests-false
+    { display:inline; }
+</style>
+</head>
+<body>
+
+<input class="picker" type="radio" name="tone" id="tone-formal" checked>
+<input class="picker" type="radio" name="tone" id="tone-casual">
+<input class="picker" type="radio" name="tone" id="tone-terse">
+<input class="picker" type="radio" name="depth" id="depth-summary" checked>
+<input class="picker" type="radio" name="depth" id="depth-full">
+<input class="picker" type="checkbox" id="tests-yes">
+
+<main class="card">
+  <h1>Pick your options</h1>
+  <p class="lede">Choose below, then copy the JSON and paste it back to the agent. Nothing is sent anywhere — the whole page is CSS.</p>
+
+  <fieldset>
+    <legend>Tone</legend>
+    <div class="options">
+      <label for="tone-formal">Formal</label>
+      <label for="tone-casual">Casual</label>
+      <label for="tone-terse">Terse</label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Depth</legend>
+    <div class="options">
+      <label for="depth-summary">Summary</label>
+      <label for="depth-full">Full detail</label>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Extras</legend>
+    <div class="options">
+      <label for="tests-yes">Include tests</label>
+    </div>
+  </fieldset>
+
+  <h2>Copy this back</h2>
+<pre>{
+  "tone": "<span class="v v-tone-formal">formal</span><span class="v v-tone-casual">casual</span><span class="v v-tone-terse">terse</span>",
+  "depth": "<span class="v v-depth-summary">summary</span><span class="v v-depth-full">full</span>",
+  "include_tests": <span class="v v-tests-true">true</span><span class="v v-tests-false">false</span>
+}</pre>
+  <p class="hint">Hidden options are <code>display:none</code>, so selecting the block copies only your choices.</p>
+</main>
+
+</body>
+</html>

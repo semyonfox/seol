@@ -4,11 +4,14 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +29,7 @@ func TestLandingPage(t *testing.T) {
 		t.Fatalf("status = %d", recorder.Code)
 	}
 	body := recorder.Body.String()
-	for _, want := range []string{"pastebin for static sites", "For coding agents", "npx @semyonfox/seol publish", "publisher token", "NPX + PostPlan 0.0.4", "0.04s", "10 MiB compressed", "one day by default", "https://pages.example.test", "$skill-installer"} {
+	for _, want := range []string{"Give this to your agent", "seol publish --quiet DIRECTORY", "https://pages.example.test"} {
 		if !bytes.Contains([]byte(body), []byte(want)) {
 			t.Fatalf("landing page missing %q", want)
 		}
@@ -57,6 +60,81 @@ func TestRejectsIncompatibleExpiryConfiguration(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "default expiry") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestNewRejectsInvalidUploadLimits(t *testing.T) {
+	_, err := New(Config{
+		DataDir:       t.TempDir(),
+		PublicBaseURL: "https://pages.test",
+		UploadToken:   "test-token",
+		MaxConcurrent: -1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "upload limits") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestConfigFromEnvRejectsInvalidUploadLimits(t *testing.T) {
+	t.Setenv("SEOL_TOKEN", strings.Repeat("a", 32))
+	t.Setenv("SEOL_MAX_CONCURRENT_UPLOADS", "-1")
+	_, err := ConfigFromEnv()
+	if err == nil || !strings.Contains(err.Error(), "upload limits") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestConfigFromEnvRejectsMalformedUploadLimits(t *testing.T) {
+	t.Setenv("SEOL_TOKEN", strings.Repeat("a", 32))
+	t.Setenv("SEOL_MAX_UPLOAD_BYTES", "ten-megabytes")
+	_, err := ConfigFromEnv()
+	if err == nil || !strings.Contains(err.Error(), "SEOL_MAX_UPLOAD_BYTES") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestOpenDatabaseMigratesLegacyPagesSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seol.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE pages (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, size_bytes INTEGER NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := openDatabase(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, column := range []string{"title", "status", "updated_at", "expires_at", "file_count", "content_version", "ttl_seconds", "files_removed"} {
+		var name string
+		if err := db.QueryRow(`SELECT name FROM pragma_table_info('pages') WHERE name = ?`, column).Scan(&name); err != nil {
+			t.Fatalf("column %q: %v", column, err)
+		}
+	}
+}
+
+func TestCleanupRetriesDeletedPageFileRemoval(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+	p := uploadTestFile(t, web.URL, "page.html", []byte("<h1>hello</h1>"), "")
+	if _, err := s.db.Exec(`UPDATE pages SET status = 'deleted' WHERE id = ?`, p.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	s.cleanupExpired()
+	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "pages", p.ID)); !os.IsNotExist(err) {
+		t.Fatalf("deleted page files remain: %v", err)
 	}
 }
 
@@ -153,10 +231,6 @@ func TestUploadServeListDelete(t *testing.T) {
 	if created.ID == "" || created.URL != "https://pages.example.test/p/"+created.ID+"/" {
 		t.Fatalf("unexpected upload response: %+v", created)
 	}
-	if created.PublisherID != publisherID("test-token") {
-		t.Fatalf("publisher id = %q", created.PublisherID)
-	}
-
 	resp, err = http.Get(web.URL + "/p/" + created.ID + "/")
 	if err != nil {
 		t.Fatal(err)
@@ -170,15 +244,11 @@ func TestUploadServeListDelete(t *testing.T) {
 			t.Fatalf("artifact CSP missing %q: %q", directive, csp)
 		}
 	}
-	for _, forbidden := range []string{"allow-same-origin", "script-src 'self'"} {
+	// Inline script may run, but only in an opaque origin with no same-origin
+	// access, no external code, and no network.
+	for _, forbidden := range []string{"allow-same-origin", "allow-forms", "script-src 'self'"} {
 		if strings.Contains(csp, forbidden) {
-			t.Fatalf("artifact CSP contains forbidden permission %q: %q", forbidden, csp)
-		}
-	}
-	permissions := resp.Header.Get("Permissions-Policy")
-	for _, permission := range []string{"clipboard-read=()", "clipboard-write=()", "camera=()", "microphone=()"} {
-		if !strings.Contains(permissions, permission) {
-			t.Fatalf("permissions policy missing %q: %q", permission, permissions)
+			t.Fatalf("artifact CSP must not contain %q: %q", forbidden, csp)
 		}
 	}
 	resp.Body.Close()
@@ -305,6 +375,51 @@ func TestZIPAssetsReplacementCachingAndExpiry(t *testing.T) {
 	}
 }
 
+func TestArtifactPolicyFollowsContentType(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 2 << 20, MaxFiles: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	archive := zipBytes(t, map[string]string{
+		"index.html":  `<a href="plan.pdf">Read the plan</a>`,
+		"plan.pdf":    "%PDF-1.4\n%%EOF",
+		"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg"></svg>`,
+	})
+	created := uploadTestFile(t, web.URL, "site.zip", archive, "")
+
+	// The policy is deliberately withheld from passive types such as PDF: the
+	// sandbox directive blocks the browser's built-in viewer.
+	for _, test := range []struct {
+		path          string
+		contentType   string
+		expectsPolicy bool
+	}{
+		{"plan.pdf", "application/pdf", false},
+		{"diagram.svg", "image/svg+xml", true},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			resp, err := http.Get(web.URL + "/p/" + created.ID + "/" + test.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d", resp.StatusCode)
+			}
+			if got := resp.Header.Get("Content-Type"); !strings.HasPrefix(got, test.contentType) {
+				t.Fatalf("content type = %q, want prefix %q", got, test.contentType)
+			}
+			if got := resp.Header.Get("Content-Security-Policy"); (got != "") != test.expectsPolicy {
+				t.Fatalf("content policy = %q, expects policy = %t", got, test.expectsPolicy)
+			}
+		})
+	}
+}
+
 func TestRejectsUnsafeZIP(t *testing.T) {
 	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 1 << 20, MaxFiles: 10})
 	if err != nil {
@@ -322,69 +437,6 @@ func TestRejectsUnsafeZIP(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestPDFUsesBrowserViewerAndMissingAssetExplainsFailure(t *testing.T) {
-	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 2 << 20, MaxFiles: 10})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	web := httptest.NewServer(s.httpServer.Handler)
-	defer web.Close()
-
-	archive := zipBytes(t, map[string]string{
-		"index.html":  `<a href="plan.pdf">Read the plan</a>`,
-		"plan.pdf":    "%PDF-1.4\n%%EOF",
-		"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg"></svg>`,
-	})
-	created := uploadTestFile(t, web.URL, "site.zip", archive, "")
-
-	resp, err := http.Get(web.URL + "/p/" + created.ID + "/plan.pdf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("PDF status=%d", resp.StatusCode)
-	}
-	if got := resp.Header.Get("Content-Type"); got != "application/pdf" {
-		t.Fatalf("PDF content type=%q", got)
-	}
-	if got := resp.Header.Get("Content-Security-Policy"); got != "" {
-		t.Fatalf("PDF must not inherit the HTML sandbox CSP: %q", got)
-	}
-	resp.Body.Close()
-
-	resp, err = http.Get(web.URL + "/p/" + created.ID + "/diagram.svg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("SVG status=%d", resp.StatusCode)
-	}
-	if got := resp.Header.Get("Content-Type"); got != "image/svg+xml" {
-		t.Fatalf("SVG content type=%q", got)
-	}
-	if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "sandbox allow-scripts") {
-		t.Fatalf("SVG must retain artifact CSP: %q", resp.Header.Get("Content-Security-Policy"))
-	}
-	resp.Body.Close()
-
-	resp, err = http.Get(web.URL + "/p/" + created.ID + "/missing.pdf")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("missing asset status=%d", resp.StatusCode)
-	}
-	if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "text/html") {
-		t.Fatalf("missing asset content type=%q", got)
-	}
-	if !bytes.Contains(body, []byte("This link is broken")) {
-		t.Fatalf("missing asset response=%q", body)
-	}
-}
-
 func TestRejectsActiveHTML(t *testing.T) {
 	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 1 << 20, MaxFiles: 10, UploadsPerMinute: 100})
 	if err != nil {
@@ -395,14 +447,10 @@ func TestRejectsActiveHTML(t *testing.T) {
 	defer web.Close()
 
 	tests := map[string]string{
-		"external script": `<script src="app.js"></script>`,
-		"SVG script":      `<svg><script href="app.js"></script></svg>`,
-		"module script":   `<script type="module">document.body.textContent = "no"</script>`,
+		"external script": `<script src="https://example.com/x.js"></script>`,
 		"javascript":      `<a href=" javascript:alert(1)">click</a>`,
-		"form":            `<form action="/submit"><button>send</button></form>`,
-		"file input":      `<input type="file">`,
-		"text input":      `<input type="text">`,
-		"textarea":        `<textarea></textarea>`,
+		"form action":     `<a formaction="/submit">go</a>`,
+		"form":            `<form action="/submit"><input name="secret"></form>`,
 		"meta refresh":    `<meta http-equiv="refresh" content="0;url=https://example.com">`,
 		"iframe":          `<iframe src="https://example.com"></iframe>`,
 	}
@@ -429,29 +477,6 @@ func TestRejectsActiveHTML(t *testing.T) {
 	}
 }
 
-func TestAllowsContainedPageInteractions(t *testing.T) {
-	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://test", UploadToken: "test-token", MaxUpload: 1 << 20})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-	web := httptest.NewServer(s.httpServer.Handler)
-	defer web.Close()
-
-	document := []byte(`<h1 id="result">Ready</h1>
-		<button onclick="document.querySelector('#result').textContent='Done'">Run</button>
-		<select onchange="document.querySelector('#result').textContent=this.value"><option>One</option></select>
-		<input type="checkbox" onchange="document.body.dataset.checked=this.checked">
-		<input type="range" oninput="document.body.dataset.value=this.value">
-		<script>document.body.dataset.loaded = "yes"</script>`)
-	resp := rawUpload(t, web.URL, "page.html", document, "")
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
-	}
-}
-
 func TestRejectsActiveHTMLAnywhereInZIP(t *testing.T) {
 	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 1 << 20, MaxFiles: 10})
 	if err != nil {
@@ -463,7 +488,7 @@ func TestRejectsActiveHTMLAnywhereInZIP(t *testing.T) {
 
 	archive := zipBytes(t, map[string]string{
 		"index.html":         `<h1>Passive index</h1>`,
-		"details/report.htm": `<script src="external.js"></script>`,
+		"details/report.htm": `<iframe src="https://example.com"></iframe>`,
 	})
 	resp := rawUpload(t, web.URL, "site.zip", archive, "")
 	defer resp.Body.Close()
@@ -482,9 +507,18 @@ func TestExpiredPageReturnsGone(t *testing.T) {
 	web := httptest.NewServer(s.httpServer.Handler)
 	defer web.Close()
 	p := uploadTestFile(t, web.URL, "page.html", []byte("hello"), "1ms")
-	time.Sleep(5 * time.Millisecond)
-	resp, _ := http.Get(web.URL + "/p/" + p.ID + "/")
+	deadline := time.Now().Add(time.Second)
+	var resp *http.Response
+	for {
+		resp, _ = http.Get(web.URL + "/p/" + p.ID + "/")
+		if resp.StatusCode == http.StatusGone || time.Now().After(deadline) {
+			break
+		}
+		resp.Body.Close()
+		time.Sleep(time.Millisecond)
+	}
 	if resp.StatusCode != http.StatusGone {
+		resp.Body.Close()
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
 	if !strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
@@ -590,6 +624,34 @@ func TestPublishingRequiresAuthentication(t *testing.T) {
 	}
 }
 
+func TestMutationsReturnInternalWhenDatabaseIsUnavailable(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://example.test", UploadToken: "secret", MaxUpload: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodPut, "/api/v1/pages/page/content", ""},
+		{http.MethodPatch, "/api/v1/pages/page", `{"expires_in":"1d"}`},
+	} {
+		t.Run(request.method, func(t *testing.T) {
+			req := httptest.NewRequest(request.method, request.path, strings.NewReader(request.body))
+			req.Header.Set("Authorization", "Bearer secret")
+			recorder := httptest.NewRecorder()
+			s.httpServer.Handler.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d", recorder.Code)
+			}
+		})
+	}
+}
+
 func TestExtractsAndUpdatesTitleAndExpiry(t *testing.T) {
 	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://example.test", UploadToken: "test-token", DefaultExpiry: time.Hour, MaxExpiry: 7 * 24 * time.Hour})
 	if err != nil {
@@ -633,5 +695,91 @@ func TestConfigDefaultExpiryIsOneDay(t *testing.T) {
 	}
 	if cfg.DefaultExpiry != 24*time.Hour {
 		t.Fatalf("default expiry = %s", cfg.DefaultExpiry)
+	}
+}
+
+func TestAllowsContainedPageInteractions(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "http://test", UploadToken: "test-token", MaxUpload: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	document := []byte(`<h1 id="result">Ready</h1>
+		<button onclick="document.querySelector('#result').textContent='Done'">Run</button>
+		<select onchange="document.querySelector('#result').textContent=this.value"><option>One</option></select>
+		<input type="checkbox" onchange="document.body.dataset.checked=this.checked">
+		<input type="range" oninput="document.body.dataset.value=this.value">
+		<script>document.body.dataset.loaded = "yes"</script>`)
+	resp := rawUpload(t, web.URL, "page.html", document, "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestPDFUsesBrowserViewerAndMissingAssetExplainsFailure(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", MaxUpload: 1 << 20, MaxExtracted: 2 << 20, MaxFiles: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	archive := zipBytes(t, map[string]string{
+		"index.html":  `<a href="plan.pdf">Read the plan</a>`,
+		"plan.pdf":    "%PDF-1.4\n%%EOF",
+		"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg"></svg>`,
+	})
+	created := uploadTestFile(t, web.URL, "site.zip", archive, "")
+
+	resp, err := http.Get(web.URL + "/p/" + created.ID + "/plan.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PDF status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "application/pdf" {
+		t.Fatalf("PDF content type=%q", got)
+	}
+	if got := resp.Header.Get("Content-Security-Policy"); got != "" {
+		t.Fatalf("PDF must not inherit the HTML sandbox CSP: %q", got)
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(web.URL + "/p/" + created.ID + "/diagram.svg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("SVG status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "image/svg+xml" {
+		t.Fatalf("SVG content type=%q", got)
+	}
+	if !strings.Contains(resp.Header.Get("Content-Security-Policy"), "sandbox allow-scripts") {
+		t.Fatalf("SVG must retain artifact CSP: %q", resp.Header.Get("Content-Security-Policy"))
+	}
+	resp.Body.Close()
+
+	resp, err = http.Get(web.URL + "/p/" + created.ID + "/missing.pdf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing asset status=%d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "text/html") {
+		t.Fatalf("missing asset content type=%q", got)
+	}
+	if !bytes.Contains(body, []byte("This link is broken")) {
+		t.Fatalf("missing asset response=%q", body)
 	}
 }

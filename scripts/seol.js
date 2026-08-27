@@ -23,18 +23,24 @@ const architectureNames = {
   arm64: "arm64",
   x64: "x64",
 };
+const maxRedirects = 5;
+const maxDownloadBytes = 64 * 1024 * 1024;
 
 function fail(message) {
   process.stderr.write(`seol: ${message}\n`);
   process.exit(1);
 }
 
-function get(url, client = https) {
+function get(url, client = https, redirects = 0) {
   return new Promise((resolve, reject) => {
     const request = client.get(url, { headers: { "User-Agent": "seol-npm-cli" } }, (response) => {
       if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         response.resume();
-        resolve(get(new URL(response.headers.location, url).toString(), client));
+        if (redirects >= maxRedirects) {
+          reject(new Error("download exceeded redirect limit"));
+          return;
+        }
+        resolve(get(new URL(response.headers.location, url).toString(), client, redirects + 1));
         return;
       }
       if (response.statusCode !== 200) {
@@ -43,8 +49,27 @@ function get(url, client = https) {
         return;
       }
       const chunks = [];
-      response.on("data", (chunk) => chunks.push(chunk));
-      response.on("end", () => resolve(Buffer.concat(chunks)));
+      let size = 0;
+      let complete = false;
+      response.on("data", (chunk) => {
+        if (complete) {
+          return;
+        }
+        size += chunk.length;
+        if (size > maxDownloadBytes) {
+          complete = true;
+          const error = new Error("download exceeds 64 MiB limit");
+          request.destroy(error);
+          reject(error);
+          return;
+        }
+        chunks.push(chunk);
+      });
+      response.on("end", () => {
+        if (!complete) {
+          resolve(Buffer.concat(chunks));
+        }
+      });
       response.on("error", reject);
     });
     request.setTimeout(30_000, () => request.destroy(new Error("download timed out")));
@@ -67,7 +92,10 @@ async function installBinary(binaryPath, assetName) {
   }
   const expected = expectedLine.trim().split(/\s+/)[0];
   const actual = crypto.createHash("sha256").update(binary).digest("hex");
-  if (!crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected))) {
+  // Compare lengths first: timingSafeEqual throws on a length mismatch, which a
+  // malformed checksums.txt would otherwise surface as an opaque RangeError.
+  if (actual.length !== expected.length ||
+      !crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected))) {
     throw new Error(`checksum verification failed for ${assetName}`);
   }
   fs.mkdirSync(path.dirname(binaryPath), { recursive: true, mode: 0o700 });

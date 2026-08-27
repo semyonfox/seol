@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,7 +21,20 @@ import (
 type clientConfig struct{ Server, Token string }
 
 type clientPageState struct {
-	Pages map[string]string `json:"pages"`
+	Pages   map[string]string          `json:"pages"`
+	History map[string]clientPageEntry `json:"history"`
+}
+
+// clientPageEntry is local convenience metadata. It deliberately never stores
+// uploaded content, so Seol remains a temporary handoff service.
+type clientPageEntry struct {
+	ID          string  `json:"id"`
+	URL         string  `json:"url"`
+	Server      string  `json:"server"`
+	Source      string  `json:"source"`
+	Title       string  `json:"title,omitempty"`
+	PublishedAt string  `json:"published_at"`
+	ExpiresAt   *string `json:"expires_at,omitempty"`
 }
 
 var managementHTTPClient = &http.Client{Timeout: 30 * time.Second}
@@ -59,11 +73,21 @@ func ConfigureCLI(args []string) error {
 	return nil
 }
 
+// defaultServer is the instance a client talks to when nothing else is
+// configured. Forks and self-hosters can point their own builds elsewhere with
+// -ldflags "-X github.com/semyonfox/seol/internal/app.defaultServer=https://host".
+var defaultServer = "https://seol.semyon.ie"
+
 func loadClientConfig() clientConfig {
-	c := clientConfig{Server: env("SEOL_SERVER", "https://seol.semyon.ie"), Token: os.Getenv("SEOL_TOKEN")}
+	c := clientConfig{Server: os.Getenv("SEOL_SERVER"), Token: os.Getenv("SEOL_TOKEN")}
 	stored := readClientConfigFile()
 	if os.Getenv("SEOL_SERVER") == "" && stored.Server != "" {
 		c.Server = stored.Server
+	}
+	// An explicitly configured server always wins; the default only applies
+	// when the environment and the config file are both silent.
+	if c.Server == "" {
+		c.Server = defaultServer
 	}
 	if os.Getenv("SEOL_TOKEN") == "" {
 		c.Token = stored.Token
@@ -100,6 +124,32 @@ func readClientConfigFile() clientConfig {
 	return c
 }
 
+func resolveServer(server string) (string, error) {
+	server = strings.TrimRight(strings.TrimSpace(server), "/")
+	if server == "" {
+		return "", errors.New("Seol server is not configured; run: seol configure --server https://your-seol-host")
+	}
+	return server, nil
+}
+
+// checkedEndpoint validates the server and appends an already-trusted path.
+func checkedEndpoint(server, path string) (string, error) {
+	base, err := resolveServer(server)
+	if err != nil {
+		return "", err
+	}
+	return base + path, nil
+}
+
+// pathSafeID guards page identifiers before they are interpolated into a URL
+// path, so a stray argument cannot redirect the request to another endpoint.
+func pathSafeID(id string) (string, error) {
+	if !validID(id) {
+		return "", fmt.Errorf("invalid page ID: %q", id)
+	}
+	return id, nil
+}
+
 func clientConfigDir() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -109,6 +159,14 @@ func clientConfigDir() (string, error) {
 }
 
 func sourceStateKey(server, source string) (string, error) {
+	absolute, err := canonicalSourcePath(source)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(server, "/") + "\n" + absolute, nil
+}
+
+func canonicalSourcePath(source string) (string, error) {
 	absolute, err := filepath.Abs(source)
 	if err != nil {
 		return "", err
@@ -117,11 +175,11 @@ func sourceStateKey(server, source string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimRight(server, "/") + "\n" + filepath.Clean(absolute), nil
+	return filepath.Clean(absolute), nil
 }
 
 func loadClientPageState() clientPageState {
-	state := clientPageState{Pages: make(map[string]string)}
+	state := clientPageState{Pages: make(map[string]string), History: make(map[string]clientPageEntry)}
 	dir, err := clientConfigDir()
 	if err != nil {
 		return state
@@ -130,8 +188,14 @@ func loadClientPageState() clientPageState {
 	if err != nil {
 		return state
 	}
-	if json.Unmarshal(data, &state) != nil || state.Pages == nil {
+	if json.Unmarshal(data, &state) != nil {
+		return clientPageState{Pages: make(map[string]string), History: make(map[string]clientPageEntry)}
+	}
+	if state.Pages == nil {
 		state.Pages = make(map[string]string)
+	}
+	if state.History == nil {
+		state.History = make(map[string]clientPageEntry)
 	}
 	return state
 }
@@ -182,8 +246,16 @@ func uploadCommand(method, id string, args []string) error {
 	if *token == "" {
 		return errors.New("Seol token is not configured")
 	}
+	resolvedServer, err := resolveServer(*server)
+	if err != nil {
+		return err
+	}
 	sourcePath := flags.Arg(0)
-	stateKey, err := sourceStateKey(*server, sourcePath)
+	stateKey, err := sourceStateKey(resolvedServer, sourcePath)
+	if err != nil {
+		return err
+	}
+	sourceLocation, err := canonicalSourcePath(sourcePath)
 	if err != nil {
 		return err
 	}
@@ -225,9 +297,13 @@ func uploadCommand(method, id string, args []string) error {
 	if err = writer.Close(); err != nil {
 		return err
 	}
-	endpoint := strings.TrimRight(*server, "/") + "/api/v1/pages"
+	endpoint := resolvedServer + "/api/v1/pages"
 	if method == http.MethodPut {
-		endpoint += "/" + id + "/content"
+		safeID, idErr := pathSafeID(id)
+		if idErr != nil {
+			return idErr
+		}
+		endpoint += "/" + safeID + "/content"
 	}
 	req, err := http.NewRequest(method, endpoint, &body)
 	if err != nil {
@@ -255,6 +331,15 @@ func uploadCommand(method, id string, args []string) error {
 		return err
 	}
 	state.Pages[stateKey] = p.ID
+	state.History[stateKey] = clientPageEntry{
+		ID:          p.ID,
+		URL:         p.URL,
+		Server:      resolvedServer,
+		Source:      sourceLocation,
+		Title:       p.Title,
+		PublishedAt: time.Now().UTC().Format(time.RFC3339),
+		ExpiresAt:   p.ExpiresAt,
+	}
 	if err := saveClientPageState(state); err != nil {
 		return fmt.Errorf("page published but local source state could not be saved: %w", err)
 	}
@@ -334,6 +419,38 @@ func uploadPath(path string) (string, func(), error) {
 }
 
 func ListCLI(args []string) error { return metadataCommand("list", "", args) }
+func HistoryCLI(args []string) error {
+	flags := flag.NewFlagSet("history", flag.ContinueOnError)
+	jsonOutput := flags.Bool("json", false, "JSON output")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("usage: seol history [--json]")
+	}
+	state := loadClientPageState()
+	entries := make([]clientPageEntry, 0, len(state.History))
+	for _, entry := range state.History {
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].PublishedAt > entries[j].PublishedAt })
+	if *jsonOutput {
+		encoded, err := json.MarshalIndent(entries, "", "  ")
+		if err != nil {
+			return err
+		}
+		fmt.Println(string(encoded))
+		return nil
+	}
+	for _, entry := range entries {
+		title := entry.Title
+		if title == "" {
+			title = "-"
+		}
+		fmt.Printf("%-22s  %-10s  %-20s  %s\n  %s\n", entry.ID, expiryDisplay(entry.ExpiresAt), title, entry.URL, entry.Source)
+	}
+	return nil
+}
 func StatsCLI(args []string) error {
 	cfg := loadClientConfig()
 	flags := flag.NewFlagSet("stats", flag.ContinueOnError)
@@ -349,7 +466,11 @@ func StatsCLI(args []string) error {
 	if *token == "" {
 		return errors.New("Seol token is not configured")
 	}
-	body, err := clientRequest(http.MethodGet, strings.TrimRight(*server, "/")+"/api/v1/stats", *token)
+	endpoint, err := checkedEndpoint(*server, "/api/v1/stats")
+	if err != nil {
+		return err
+	}
+	body, err := clientRequest(http.MethodGet, endpoint, *token)
 	if err != nil {
 		return err
 	}
@@ -409,9 +530,16 @@ func metadataCommand(kind, id string, args []string) error {
 	if *token == "" {
 		return errors.New("Seol token is not configured")
 	}
-	endpoint := strings.TrimRight(*server, "/") + "/api/v1/pages"
+	endpoint, err := checkedEndpoint(*server, "/api/v1/pages")
+	if err != nil {
+		return err
+	}
 	if id != "" {
-		endpoint += "/" + id
+		safeID, idErr := pathSafeID(id)
+		if idErr != nil {
+			return idErr
+		}
+		endpoint += "/" + safeID
 	}
 	body, err := clientRequest(http.MethodGet, endpoint, *token)
 	if err != nil {
@@ -484,7 +612,15 @@ func DeleteCLI(args []string) error {
 	if *token == "" {
 		return errors.New("Seol token is not configured")
 	}
-	_, err := clientRequest(http.MethodDelete, strings.TrimRight(*server, "/")+"/api/v1/pages/"+id, *token)
+	safeID, err := pathSafeID(id)
+	if err != nil {
+		return err
+	}
+	endpoint, err := checkedEndpoint(*server, "/api/v1/pages/"+safeID)
+	if err != nil {
+		return err
+	}
+	_, err = clientRequest(http.MethodDelete, endpoint, *token)
 	if err == nil {
 		fmt.Println("Deleted:", id)
 	}
@@ -507,11 +643,19 @@ func ExpiryCLI(args []string) error {
 	if *token == "" {
 		return errors.New("Seol token is not configured")
 	}
+	safeID, err := pathSafeID(id)
+	if err != nil {
+		return err
+	}
+	endpoint, err := checkedEndpoint(*server, "/api/v1/pages/"+safeID)
+	if err != nil {
+		return err
+	}
 	payload, err := json.Marshal(map[string]string{"expires_in": duration})
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPatch, strings.TrimRight(*server, "/")+"/api/v1/pages/"+id, bytes.NewReader(payload))
+	req, err := http.NewRequest(http.MethodPatch, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
