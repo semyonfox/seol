@@ -73,13 +73,21 @@ func ConfigureCLI(args []string) error {
 	return nil
 }
 
+// defaultServer is the instance a client talks to when nothing else is
+// configured. Forks and self-hosters can point their own builds elsewhere with
+// -ldflags "-X github.com/semyonfox/seol/internal/app.defaultServer=https://host".
+var defaultServer = "https://seol.semyon.ie"
+
 func loadClientConfig() clientConfig {
-	// No default server: a token must never be sent to a host the user did not
-	// choose. Commands fail with a clear message until one is configured.
 	c := clientConfig{Server: os.Getenv("SEOL_SERVER"), Token: os.Getenv("SEOL_TOKEN")}
 	stored := readClientConfigFile()
 	if os.Getenv("SEOL_SERVER") == "" && stored.Server != "" {
 		c.Server = stored.Server
+	}
+	// An explicitly configured server always wins; the default only applies
+	// when the environment and the config file are both silent.
+	if c.Server == "" {
+		c.Server = defaultServer
 	}
 	if os.Getenv("SEOL_TOKEN") == "" {
 		c.Token = stored.Token

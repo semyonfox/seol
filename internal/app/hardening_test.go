@@ -575,26 +575,35 @@ func TestRepeatedInputTypeUsesTheRenderedValue(t *testing.T) {
 	}
 }
 
-func TestClientCommandsRequireAConfiguredServer(t *testing.T) {
+func TestClientFallsBackToTheDefaultServer(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("SEOL_SERVER", "")
-	t.Setenv("SEOL_TOKEN", "some-token")
+	t.Setenv("SEOL_TOKEN", "")
+	if got := loadClientConfig().Server; got != defaultServer {
+		t.Fatalf("server = %q, want the default instance %q", got, defaultServer)
+	}
+}
 
-	page := filepath.Join(t.TempDir(), "page.html")
-	if err := os.WriteFile(page, []byte("<h1>hi</h1>"), 0o600); err != nil {
+func TestConfiguredServerOverridesTheDefault(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("SEOL_SERVER", "")
+	t.Setenv("SEOL_TOKEN", "")
+	if err := ConfigureCLI([]string{"--server", "https://private.example", "--token", "stored"}); err != nil {
 		t.Fatal(err)
 	}
-	for name, run := range map[string]func() error{
-		"publish": func() error { return UploadCLI([]string{page}) },
-		"list":    func() error { return ListCLI(nil) },
-		"stats":   func() error { return StatsCLI(nil) },
-		"delete":  func() error { return DeleteCLI([]string{strings.Repeat("a", 22)}) },
-		"expiry":  func() error { return ExpiryCLI([]string{strings.Repeat("a", 22), "1d"}) },
-	} {
-		err := run()
-		if err == nil || !strings.Contains(err.Error(), "server is not configured") {
-			t.Fatalf("%s: error = %v, want a configuration error rather than a request to a default host", name, err)
-		}
+	if got := loadClientConfig().Server; got != "https://private.example" {
+		t.Fatalf("stored server = %q, want the configured host to win", got)
+	}
+	t.Setenv("SEOL_SERVER", "https://env.example")
+	if got := loadClientConfig().Server; got != "https://env.example" {
+		t.Fatalf("env server = %q, want the environment to win", got)
+	}
+}
+
+func TestBlankServerIsStillRejected(t *testing.T) {
+	if _, err := resolveServer("   "); err == nil {
+		t.Fatal("a blank --server must not fall through to a request against an empty host")
 	}
 }
 
