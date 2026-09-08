@@ -28,6 +28,14 @@ func TestLandingPage(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d", recorder.Code)
 	}
+	if got := recorder.Header().Get("X-Robots-Tag"); got != "" {
+		t.Fatalf("landing page must be indexable, got X-Robots-Tag %q", got)
+	}
+	head := httptest.NewRecorder()
+	s.httpServer.Handler.ServeHTTP(head, httptest.NewRequestWithContext(context.Background(), http.MethodHead, "/", nil))
+	if head.Code != http.StatusOK || head.Header().Get("X-Robots-Tag") != "" {
+		t.Fatalf("landing HEAD status=%d headers=%v", head.Code, head.Header())
+	}
 	body := recorder.Body.String()
 	for _, want := range []string{"Give this to your agent", "seol publish --quiet DIRECTORY", "https://pages.example.test"} {
 		if !bytes.Contains([]byte(body), []byte(want)) {
@@ -235,7 +243,7 @@ func TestUploadServeListDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Robots-Tag") == "" {
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Robots-Tag") != "noindex, nofollow, noarchive" {
 		t.Fatalf("serve response status=%d headers=%v", resp.StatusCode, resp.Header)
 	}
 	csp := resp.Header.Get("Content-Security-Policy")

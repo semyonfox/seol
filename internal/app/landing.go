@@ -151,6 +151,8 @@ func (s *Server) landingPage(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "Could not render landing page.", http.StatusInternalServerError)
 		return
 	}
+	// The public landing page can be indexed; temporary uploads retain noindex.
+	w.Header().Del("X-Robots-Tag")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	_, _ = page.WriteTo(w)
