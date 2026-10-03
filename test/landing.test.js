@@ -11,9 +11,10 @@ function fixture(options = {}) {
   const writes = [];
   const statuses = [];
   const handlers = new Map();
+  const windowHandlers = new Map();
   let time = 0;
   let selected = null;
-  let preference = options.preference ?? null;
+  const storage = options.storage ?? { preference: options.preference ?? null, unreadable: options.storageFails ?? false };
   let timerId = 0;
   const timers = new Map();
   const toggle = { checked: false, disabled: true, addEventListener: (_name, fn) => handlers.set("change", fn) };
@@ -31,8 +32,8 @@ function fixture(options = {}) {
     } },
   };
   const localStorage = {
-    getItem: () => { if (options.storageFails) throw new Error("private storage error"); return preference; },
-    setItem: (_key, value) => { if (options.storageFails) throw new Error("private storage error"); preference = value; },
+    getItem: () => { if (storage.unreadable) throw new Error("private storage error"); return storage.preference; },
+    setItem: (_key, value) => { if (storage.unreadable) throw new Error("private storage error"); storage.preference = value; },
   };
   const context = {
     document: {
@@ -46,7 +47,11 @@ function fixture(options = {}) {
     },
     location: { origin: "https://pages.example.test", pathname: "/p/PRIVATE-ID/", search: "?private=PRIVATE", href: "https://pages.example.test/p/PRIVATE-ID/?private=PRIVATE" },
     navigator,
-    window: { doNotTrack: options.windowDNT, getSelection: () => ({ removeAllRanges() {}, addRange() {} }) },
+    window: {
+      doNotTrack: options.windowDNT,
+      getSelection: () => ({ removeAllRanges() {}, addRange() {} }),
+      addEventListener: (name, fn) => windowHandlers.set(name, fn),
+    },
     localStorage, URL, AbortController,
     Date: { now: () => time },
     setTimeout: (fn, delay) => { const id = ++timerId; timers.set(id, { fn, at: time + delay }); return id; },
@@ -64,7 +69,9 @@ function fixture(options = {}) {
     requests, writes, statuses, toggle, navigator, code, privacyStatus,
     click: () => handlers.get("click")(),
     change: (checked) => { toggle.checked = checked; handlers.get("change")(); },
-    preference: () => preference,
+    preference: () => storage.preference,
+    storage,
+    storageEvent: (key = "seol.telemetry.disabled") => windowHandlers.get("storage")?.({ key }),
     selected: () => selected,
     advance: (milliseconds) => {
       time += milliseconds;
@@ -123,6 +130,86 @@ test("opt-out persists only a boolean and takes effect before another copy", asy
   assert.equal(app.preference(), "false"); assert.equal(app.requests.length, 2);
   app.navigator.globalPrivacyControl = true;
   await app.click(); await flush(); assert.equal(app.requests.length, 2);
+});
+
+test("other-tab disable suppresses real copies before storage-event delivery", async () => {
+  for (const copyFails of [false, true]) {
+    const storage = { preference: null, unreadable: false };
+    const app = fixture({ enabled: true, storage, copyFails });
+    const other = fixture({ enabled: true, storage });
+    await flush();
+    other.change(false);
+    await app.click(); await flush();
+    assert.equal(app.requests.length, 1, "no count or error after another tab disables");
+    assert.equal(app.toggle.checked, false);
+    assert.match(app.privacyStatus.textContent, /counts are off/);
+    if (copyFails) {
+      assert.equal(app.selected(), app.code);
+      assert.match(app.statuses[0].textContent, /Text selected/);
+    } else {
+      assert.equal(app.writes[0], app.code.textContent);
+      assert.match(app.statuses[0].textContent, /^Copied/);
+    }
+  }
+});
+
+test("storage becoming unreadable suppresses successful and fallback copy telemetry", async () => {
+  for (const copyFails of [false, true]) {
+    const app = fixture({ enabled: true, copyFails }); await flush();
+    app.storage.unreadable = true;
+    await app.click(); await flush();
+    assert.equal(app.requests.length, 1, "unreadable preference fails closed after load");
+    assert.equal(app.toggle.checked, false);
+    assert.match(app.privacyStatus.textContent, /counts are off/);
+    if (copyFails) {
+      assert.equal(app.selected(), app.code);
+      assert.match(app.statuses[0].textContent, /Text selected/);
+    } else {
+      assert.equal(app.writes[0], app.code.textContent);
+      assert.match(app.statuses[0].textContent, /^Copied/);
+    }
+  }
+});
+
+test("preference events refresh controls and cancel pending transport without retries", async () => {
+  for (const unreadable of [false, true]) {
+    const app = fixture({ enabled: true, transportHangs: true });
+    app.storage.preference = "true";
+    app.storage.unreadable = unreadable;
+    app.storageEvent("unrelated-preference");
+    assert.equal(app.requests[0].request.signal.aborted, false);
+    app.storageEvent();
+    assert.equal(app.requests[0].request.signal.aborted, true);
+    assert.equal(app.toggle.checked, false);
+    assert.match(app.privacyStatus.textContent, /counts are off/);
+    app.advance(60_000); await app.click(); await flush();
+    assert.equal(app.requests.length, 1, "cancellation does not retry");
+    assert.equal(app.writes.length, 1);
+  }
+  const cleared = fixture({ enabled: true, preference: "true" });
+  cleared.storage.preference = null;
+  cleared.storageEvent(null);
+  assert.equal(cleared.toggle.checked, true);
+  assert.match(cleared.privacyStatus.textContent, /counts are on/);
+  assert.equal(cleared.requests.length, 0, "storage changes never send automatically");
+  await cleared.click(); await flush();
+  assert.equal(cleared.requests.length, 1);
+  cleared.storage.unreadable = true;
+  cleared.storageEvent(null);
+  assert.equal(cleared.toggle.checked, false, "storage clear also fails closed when unreadable");
+});
+
+test("other-tab enable or storage clear cannot override this tab's explicit disable", async () => {
+  const app = fixture({ enabled: true }); await flush();
+  app.change(false);
+  for (const preference of ["false", null]) {
+    app.storage.preference = preference;
+    app.storageEvent(preference === null ? null : "seol.telemetry.disabled");
+    assert.equal(app.toggle.checked, false);
+    await app.click(); await flush();
+    assert.equal(app.requests.length, 1);
+  }
+  assert.equal(app.writes.length, 2);
 });
 
 test("transport failures cannot change copying or create retries", async () => {
