@@ -270,12 +270,41 @@ func setArtifactContentPolicy(w http.ResponseWriter, contentType string) {
 	}
 }
 
+const feedbackPageStyle = `
+    :root { color-scheme:light; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100svh; display:grid; place-items:center; padding:2rem 0; background:#faf7f2; color:#201d19; font:1.125rem/1.6 system-ui,sans-serif; }
+    main { width:min(34rem,calc(100% - 2rem)); }
+    h1 { font-size:clamp(2rem,8vw,4rem); letter-spacing:-.035em; line-height:1.25; margin:0 0 1rem; text-wrap:balance; overflow-wrap:anywhere; }
+    p { color:#6d655c; text-wrap:pretty; }
+    .eyebrow { font-size:.85rem; color:#b84c20; }
+    a { display:inline-flex; align-items:center; min-height:44px; padding:.5rem 0; color:#b84c20; text-underline-offset:.18em; }
+    a:focus-visible { outline:3px solid #b84c20; outline-offset:4px; }
+`
+
 func writeNotFoundPage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", artifactCSP)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNotFound)
-	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Broken link — Seol</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#faf7f2;color:#201d19;font:18px/1.6 system-ui,sans-serif}main{width:min(34rem,calc(100% - 2rem))}h1{font-size:clamp(2.4rem,8vw,4.5rem);letter-spacing:-.04em;line-height:1;margin:0 0 1rem}p{color:#6d655c}</style><main><h1>This link is broken</h1><p>The requested file does not exist in this Seol page. Check the link or ask the publisher to upload the missing file.</p></main></html>`))
+	_, _ = w.Write([]byte(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Link not found | Seol</title>
+  <style>` + feedbackPageStyle + `</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Seol · temporary static hosting</p>
+  <h1>This link could not be found</h1>
+  <p>This page or file could not be found. Check that you copied the full link.</p>
+  <p>Ask the person who shared it for the correct link, or ask the publisher to check that the file was included.</p>
+  <a href="/">About Seol</a>
+</main>
+</body>
+</html>`))
 }
 
 func writeGonePage(w http.ResponseWriter) {
@@ -283,7 +312,24 @@ func writeGonePage(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", artifactCSP)
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.WriteHeader(http.StatusGone)
-	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Link expired — Seol</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#faf7f2;color:#201d19;font:18px/1.6 system-ui,sans-serif}main{width:min(34rem,calc(100% - 2rem))}h1{font-size:clamp(2.4rem,8vw,4.5rem);letter-spacing:-.04em;line-height:1;margin:0 0 1rem}p{color:#6d655c}</style><main><h1>This link has expired</h1><p>Seol pages are temporary. This page has expired or been removed and is no longer available.</p></main></html>`))
+	_, _ = w.Write([]byte(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Link unavailable | Seol</title>
+  <style>` + feedbackPageStyle + `</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Seol · temporary static hosting</p>
+  <h1>This page is no longer available</h1>
+  <p>Seol pages are temporary. This page has expired or been removed.</p>
+  <p>Ask the person who shared this page for a new link.</p>
+  <a href="/">About Seol</a>
+</main>
+</body>
+</html>`))
 }
 
 func isExpired(value *string) bool {
