@@ -15,15 +15,8 @@
     // missing or invalid configuration keeps counts off
   }
   const configured = settings?.dataset.enabled === "true" && validEndpoint;
+  const preferenceKey = "seol.telemetry.disabled";
   let optedOut = false;
-  if (configured) {
-    try {
-      const preference = localStorage.getItem("seol.telemetry.disabled");
-      optedOut = preference !== null && preference !== "false";
-    } catch {
-      optedOut = true;
-    }
-  }
   let total = 0;
   let times = [];
   let lastTime = 0;
@@ -41,19 +34,36 @@
     }
   }
 
+  function storedPreferenceDisabled() {
+    try {
+      const preference = localStorage.getItem(preferenceKey);
+      return preference !== null && preference !== "false";
+    } catch {
+      return true;
+    }
+  }
+
   function updatePrivacy() {
+    const browserRequestsPrivacy = privacySignal();
+    const off = !configured || optedOut || browserRequestsPrivacy || storedPreferenceDisabled();
+    if (off) pending?.abort();
     if (!toggle || !privacyStatus) return;
-    toggle.disabled = !configured || privacySignal();
-    toggle.checked = !toggle.disabled && !optedOut;
+    toggle.disabled = !configured || browserRequestsPrivacy;
+    toggle.checked = !off;
     privacyStatus.textContent = toggle.checked ? "Anonymous counts are on." :
-      privacySignal() ? "Anonymous counts are off because your browser requests privacy." :
+      browserRequestsPrivacy ? "Anonymous counts are off because your browser requests privacy." :
       "Anonymous counts are off.";
   }
 
   // only fixed categories leave this page; command text and errors stay local
   function emit(kind, name) {
     try {
-      if (!configured || optedOut || privacySignal() || pending || total >= 200) return;
+      if (!configured || optedOut || privacySignal()) return;
+      if (storedPreferenceDisabled()) {
+        updatePrivacy();
+        return;
+      }
+      if (pending || total >= 200) return;
       if (!((kind === "count" && ["screen_view", "action_completed"].includes(name)) ||
         (kind === "error" && name === "permission_failed"))) return;
       const now = Math.max(Date.now(), lastTime);
@@ -94,12 +104,16 @@
     toggle.addEventListener("change", () => {
       optedOut = !toggle.checked;
       try {
-        localStorage.setItem("seol.telemetry.disabled", String(optedOut));
+        localStorage.setItem(preferenceKey, String(optedOut));
       } catch {
         optedOut = true;
       }
-      if (optedOut) pending?.abort();
       updatePrivacy();
+    });
+  }
+  if (configured) {
+    window.addEventListener("storage", (event) => {
+      if (event.key === preferenceKey || event.key === null) updatePrivacy();
     });
   }
   updatePrivacy();
