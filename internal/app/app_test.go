@@ -787,7 +787,7 @@ func TestPDFUsesBrowserViewerAndMissingAssetExplainsFailure(t *testing.T) {
 	if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "text/html") {
 		t.Fatalf("missing asset content type=%q", got)
 	}
-	if !bytes.Contains(body, []byte("This link is broken")) {
+	if !bytes.Contains(body, []byte("This page or file could not be found")) {
 		t.Fatalf("missing asset response=%q", body)
 	}
 }
