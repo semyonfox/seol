@@ -37,7 +37,7 @@ func TestLandingPage(t *testing.T) {
 		t.Fatalf("landing HEAD status=%d headers=%v", head.Code, head.Header())
 	}
 	body := recorder.Body.String()
-	for _, want := range []string{"Give this to your agent", "seol publish --quiet DIRECTORY", "https://pages.example.test"} {
+	for _, want := range []string{"Give this to your agent", "seol publish --quiet DIRECTORY", "https://pages.example.test", "download/seol_linux_x64", "Contained inline JavaScript"} {
 		if !bytes.Contains([]byte(body), []byte(want)) {
 			t.Fatalf("landing page missing %q", want)
 		}

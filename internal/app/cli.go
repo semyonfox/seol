@@ -66,11 +66,31 @@ func ConfigureCLI(args []string) error {
 		content += fmt.Sprintf("token = %s\n", strconv.Quote(tokenToStore))
 	}
 	path := filepath.Join(dir, "config.toml")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+	if err := writePrivateFile(path, []byte(content)); err != nil {
 		return err
 	}
 	fmt.Println("Saved configuration to", path)
 	return nil
+}
+
+func writePrivateFile(path string, content []byte) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Truncate(0); err != nil {
+		file.Close()
+		return err
+	}
+	if _, err := file.Write(content); err != nil {
+		file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 // defaultServer is the instance a client talks to when nothing else is
@@ -215,7 +235,7 @@ func saveClientPageState(state clientPageState) error {
 	data = append(data, '\n')
 	// This file is convenience state rather than authority. A direct write works
 	// consistently on Windows, where renaming over an existing file does not.
-	return os.WriteFile(filepath.Join(dir, "pages.json"), data, 0o600)
+	return writePrivateFile(filepath.Join(dir, "pages.json"), data)
 }
 
 func UploadCLI(args []string) error { return uploadCommand(http.MethodPost, "", args) }
