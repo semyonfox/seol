@@ -27,6 +27,56 @@ func TestConfigurePreservesStoredToken(t *testing.T) {
 	}
 }
 
+func TestConfigureRestrictsExistingFilePermissions(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir, err := clientConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("server = \"https://old.example\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ConfigureCLI([]string{"--server", "https://new.example", "--token", "synthetic-token"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("config mode = %04o, want 0600", got)
+	}
+}
+
+func TestSaveClientPageStateRestrictsExistingFilePermissions(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir, err := clientConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "pages.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveClientPageState(clientPageState{Pages: map[string]string{}, History: map[string]clientPageEntry{}}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("state mode = %04o, want 0600", got)
+	}
+}
+
 func TestClientRequestHasTimeout(t *testing.T) {
 	originalClient := managementHTTPClient
 	managementHTTPClient = &http.Client{Timeout: 20 * time.Millisecond}
