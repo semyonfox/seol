@@ -11,3 +11,6 @@ var LogoSVG []byte
 //
 //go:embed seol-icon.svg
 var IconSVG []byte
+
+//go:embed landing.js
+var LandingJS []byte

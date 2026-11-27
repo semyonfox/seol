@@ -135,16 +135,16 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	expiresAt, ttl, err := s.expiryFromForm(request.ExpiresIn, ttlDuration(current.TTLSeconds))
-	if err != nil || expiresAt == nil {
-		message := "Expiry must be between one hour and seven days."
-		if err != nil {
-			message = err.Error()
-		}
-		writeError(w, http.StatusBadRequest, "INVALID_EXPIRY", message)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_EXPIRY", err.Error())
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	updated, err := s.scanPage(s.db.QueryRowContext(r.Context(), `UPDATE pages SET updated_at=?,expires_at=?,ttl_seconds=? WHERE id=? AND status='active' RETURNING `+pageColumns, now, expiresAt.UTC().Format(time.RFC3339), ttlSeconds(ttl), id))
+	var expiry any
+	if expiresAt != nil {
+		expiry = expiresAt.UTC().Format(time.RFC3339)
+	}
+	updated, err := s.scanPage(s.db.QueryRowContext(r.Context(), `UPDATE pages SET updated_at=?,expires_at=?,ttl_seconds=? WHERE id=? AND status='active' RETURNING `+pageColumns, now, expiry, ttlSeconds(ttl), id))
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusConflict, "CONFLICT", "Page changed while updating expiry; retry.")
 		return
@@ -192,13 +192,27 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.Status == "expired" || isExpired(p.ExpiresAt) {
-		if p.Status == "active" {
-			if _, err := s.db.Exec(`UPDATE pages SET status='expired' WHERE id=?`, id); err == nil {
-				s.reclaimPageFiles(id)
-			}
+		if p.Status != "active" {
+			writeGonePage(w)
+			return
 		}
-		writeGonePage(w)
-		return
+		// A renewal can land after this read and before the write. Expire the
+		// row only when it still has the expiry we observed, and otherwise
+		// serve the page the publisher just extended.
+		if expireHookForTest != nil {
+			expireHookForTest()
+		}
+		if s.markExpired(id, p.ExpiresAt) {
+			s.reclaimPageFiles(id)
+			writeGonePage(w)
+			return
+		}
+		fresh, freshErr := s.getPageRecord(id)
+		if freshErr != nil || fresh.Status != "active" || isExpired(fresh.ExpiresAt) {
+			writeGonePage(w)
+			return
+		}
+		p = fresh
 	}
 	requestPath := r.PathValue("path")
 	if requestPath == "" {
@@ -255,19 +269,54 @@ func setArtifactCommonHeaders(w http.ResponseWriter) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 }
 
-// setArtifactContentPolicy applies the artifact CSP only to types the browser
-// renders as an active document. A passive type such as application/pdf is
-// deliberately left without it, because the sandbox directive blocks the
-// browser's built-in viewer.
+// setArtifactContentPolicy puts the sandbox CSP on every artifact except PDF.
+// The sandbox directive blocks the browser's built-in PDF viewer. Every other
+// type gets it, including XML, so a document the browser will render cannot
+// run script on the server origin.
 func setArtifactContentPolicy(w http.ResponseWriter, contentType string) {
+	if pdfContentType(contentType) {
+		return
+	}
+	w.Header().Set("Content-Security-Policy", artifactCSP)
+}
+
+func pdfContentType(contentType string) bool {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		mediaType = contentType
 	}
-	switch mediaType {
-	case "text/html", "application/xhtml+xml", "image/svg+xml":
-		w.Header().Set("Content-Security-Policy", artifactCSP)
+	return mediaType == "application/pdf"
+}
+
+const feedbackPageStyle = `
+    :root { color-scheme:light; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100svh; display:grid; place-items:center; padding:2rem 0; background:#faf7f2; color:#201d19; font:1.125rem/1.6 system-ui,sans-serif; }
+    main { width:min(34rem,calc(100% - 2rem)); }
+    h1 { font-size:clamp(2rem,8vw,4rem); letter-spacing:-.035em; line-height:1.25; margin:0 0 1rem; text-wrap:balance; overflow-wrap:anywhere; }
+    p { color:#6d655c; text-wrap:pretty; }
+    .eyebrow { font-size:.85rem; color:#b84c20; }
+    a { display:inline-flex; align-items:center; min-height:44px; padding:.5rem 0; color:#b84c20; text-underline-offset:.18em; }
+    a:focus-visible { outline:3px solid #b84c20; outline-offset:4px; }
+`
+
+// expireHookForTest runs after servePage has observed an expiry and before it
+// records that expiry. Tests renew the page inside that window.
+var expireHookForTest func()
+
+// markExpired expires a page only when it still has the expiry that was read.
+// Zero rows means a newer write changed the page, so the caller must not
+// delete its files.
+func (s *Server) markExpired(id string, observed *string) bool {
+	if observed == nil {
+		return false
 	}
+	result, err := s.db.Exec(`UPDATE pages SET status='expired' WHERE id=? AND status='active' AND expires_at=?`, id, *observed)
+	if err != nil {
+		return false
+	}
+	rows, err := result.RowsAffected()
+	return err == nil && rows == 1
 }
 
 func writeNotFoundPage(w http.ResponseWriter) {
@@ -275,7 +324,24 @@ func writeNotFoundPage(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", artifactCSP)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusNotFound)
-	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Broken link — Seol</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#faf7f2;color:#201d19;font:18px/1.6 system-ui,sans-serif}main{width:min(34rem,calc(100% - 2rem))}h1{font-size:clamp(2.4rem,8vw,4.5rem);letter-spacing:-.04em;line-height:1;margin:0 0 1rem}p{color:#6d655c}</style><main><h1>This link is broken</h1><p>The requested file does not exist in this Seol page. Check the link or ask the publisher to upload the missing file.</p></main></html>`))
+	_, _ = w.Write([]byte(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Link not found | Seol</title>
+  <style>` + feedbackPageStyle + `</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Seol · temporary static hosting</p>
+  <h1>This link could not be found</h1>
+  <p>This page or file could not be found. Check that you copied the full link.</p>
+  <p>Ask the person who shared it for the correct link, or ask the publisher to check that the file was included.</p>
+  <a href="/">About Seol</a>
+</main>
+</body>
+</html>`))
 }
 
 func writeGonePage(w http.ResponseWriter) {
@@ -283,7 +349,24 @@ func writeGonePage(w http.ResponseWriter) {
 	w.Header().Set("Content-Security-Policy", artifactCSP)
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	w.WriteHeader(http.StatusGone)
-	_, _ = w.Write([]byte(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Link expired — Seol</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#faf7f2;color:#201d19;font:18px/1.6 system-ui,sans-serif}main{width:min(34rem,calc(100% - 2rem))}h1{font-size:clamp(2.4rem,8vw,4.5rem);letter-spacing:-.04em;line-height:1;margin:0 0 1rem}p{color:#6d655c}</style><main><h1>This link has expired</h1><p>Seol pages are temporary. This page has expired or been removed and is no longer available.</p></main></html>`))
+	_, _ = w.Write([]byte(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Link unavailable | Seol</title>
+  <style>` + feedbackPageStyle + `</style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Seol · temporary static hosting</p>
+  <h1>This page is no longer available</h1>
+  <p>Seol pages are temporary. This page has expired or been removed.</p>
+  <p>Ask the person who shared this page for a new link.</p>
+  <a href="/">About Seol</a>
+</main>
+</body>
+</html>`))
 }
 
 func isExpired(value *string) bool {

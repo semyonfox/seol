@@ -365,7 +365,37 @@ data.
 | `SEOL_MAX_FILES` | `100` archive entries |
 | `SEOL_UPLOADS_PER_MINUTE` | `5` |
 | `SEOL_MAX_CONCURRENT_UPLOADS` | `2` |
+| `SEOL_TELEMETRY_ENABLED` | `false` |
+| `SEOL_TELEMETRY_ENDPOINT` | unset |
 | `SEOL_TRUST_PROXY_HEADERS` | `false`; enable only behind a trusted proxy |
+
+## Anonymous landing-page counts
+
+Optional self-hosted statistics cover the public landing page only. Collection
+requires both `SEOL_TELEMETRY_ENABLED=true` and an owner-configured
+`SEOL_TELEMETRY_ENDPOINT`, an HTTPS ingestion URL or a relative same-origin
+proxy path. No endpoint is preselected. Keep it off until the collector and its
+proxy have been reviewed and separately deployed.
+
+The browser sends only `version`, `app`, `kind`, `name`, `surface` and `route`.
+Seol uses fixed landing-page view, successful copy and clipboard-permission
+failure categories. It never sends command text, uploaded content, page IDs,
+URLs, exception messages, stacks or visitor identifiers. Uploaded pages and
+404/410 documents remain outside collection; their content policy is unchanged.
+
+The landing page's Privacy control disables collection. Its local preference
+stores only a disabled/enabled boolean. Global Privacy Control and Do Not Track
+also disable sends. Transport omits credentials and referrers, rejects redirects,
+aborts after two seconds and never retries. Each document is limited to 20
+attempts per minute, 200 in its lifetime and one request at a time. Repeated
+copy-error categories are limited to once per minute. Failed statistics requests
+do not affect copying or navigation.
+
+The collector contract permits daily aggregate counters only, with 30-day count
+retention and 14-day error-count retention. The ingestion proxy must strip
+request metadata and disable access logs on its dedicated path. These settings
+belong to the collector deployment, not Seol's page retention. Existing
+operational and security logs remain separate.
 
 ## Development
 
@@ -385,7 +415,7 @@ compiles every release target and `make npm-pack` validates the npm package.
 
 Seol is intentionally accountless and single-publisher. It does not provide
 registration, OAuth, teams, billing, server-side runtimes, version history,
-analytics, or object storage. SQLite plus local files is the simplest reliable
+an analytics dashboard, or object storage. SQLite plus local files is the simplest reliable
 deployment; PostgreSQL and R2/S3 become useful only when running multiple
 server replicas.
 

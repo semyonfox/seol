@@ -5,10 +5,12 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -75,10 +77,6 @@ func (s *Server) replacePage(w http.ResponseWriter, r *http.Request) {
 	}
 	if current.Status != "active" {
 		writeError(w, 404, "NOT_FOUND", "Active page not found.")
-		return
-	}
-	if err != nil {
-		writeError(w, 500, "INTERNAL", "Could not read page.")
 		return
 	}
 	ttl := ttlDuration(current.TTLSeconds)
@@ -336,13 +334,20 @@ func validatePassiveHTMLTree(root string) error {
 		if entry.IsDir() {
 			return nil
 		}
-		extension := strings.ToLower(filepath.Ext(entry.Name()))
-		if extension != ".html" && extension != ".htm" {
+		var reason string
+		var err error
+		switch documentKind(entry.Name()) {
+		case "":
 			return nil
+		case "html":
+			reason, err = passiveHTMLViolation(path)
+		default:
+			reason, err = passiveXMLViolation(path)
 		}
-		if reason, err := passiveHTMLViolation(path); err != nil {
+		if err != nil {
 			return err
-		} else if reason != "" {
+		}
+		if reason != "" {
 			relative, _ := filepath.Rel(root, path)
 			return uploadError{400, "ACTIVE_HTML", fmt.Sprintf("%s contains %s; Seol accepts contained HTML only.", filepath.ToSlash(relative), reason)}
 		}
@@ -412,11 +417,148 @@ func passiveHTMLViolation(path string) (string, error) {
 			if externalScript {
 				return "an external <script src>", nil
 			}
-			if scriptType != "" && scriptType != "text/javascript" && scriptType != "application/javascript" {
+			if !classicScriptType(scriptType) {
 				return fmt.Sprintf("<script type=%q>", scriptType), nil
 			}
 		}
 	}
+}
+
+// documentKind selects the parser that matches how the browser will read the
+// file. XML types are not run through the HTML tokeniser: it hides markup
+// inside raw-text elements and does not see a namespace prefix.
+func documentKind(name string) string {
+	extension := strings.ToLower(filepath.Ext(name))
+	switch extension {
+	case ".html", ".htm":
+		return "html"
+	case ".xhtml", ".xht", ".svg", ".xml", ".xsl", ".xslt":
+		return "xml"
+	}
+	mediaType := extensionMediaType(extension)
+	switch {
+	case mediaType == "text/html":
+		return "html"
+	case mediaType == "text/xml" || mediaType == "application/xml" || mediaType == "application/xhtml+xml" || mediaType == "image/svg+xml" || strings.HasSuffix(mediaType, "+xml"):
+		return "xml"
+	default:
+		return ""
+	}
+}
+
+func extensionMediaType(extension string) string {
+	mediaType, _, err := mime.ParseMediaType(mime.TypeByExtension(extension))
+	if err != nil {
+		return mime.TypeByExtension(extension)
+	}
+	return mediaType
+}
+
+func classicScriptType(value string) bool {
+	if value == "" {
+		return true
+	}
+	if mediaType, _, err := mime.ParseMediaType(value); err == nil {
+		value = mediaType
+	}
+	switch value {
+	case "text/javascript", "application/javascript", "text/ecmascript", "application/ecmascript":
+		return true
+	default:
+		return false
+	}
+}
+
+func passiveXMLViolation(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	decoder := xml.NewDecoder(file)
+	decoder.CharsetReader = func(charset string, input io.Reader) (io.Reader, error) {
+		switch strings.ToLower(charset) {
+		case "utf-8", "utf8", "us-ascii":
+			return input, nil
+		default:
+			return nil, fmt.Errorf("unsupported XML charset %s", charset)
+		}
+	}
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return "", nil
+			}
+			return "", uploadError{400, "ACTIVE_HTML", "Document is not well-formed XML."}
+		}
+		switch element := token.(type) {
+		case xml.Directive:
+			directive := strings.ToLower(strings.TrimSpace(string(element)))
+			if strings.HasPrefix(directive, "doctype") && strings.Contains(directive, "[") {
+				return "a document type with an internal subset", nil
+			}
+		case xml.ProcInst:
+			if strings.EqualFold(element.Target, "xml-stylesheet") {
+				return "an XML stylesheet", nil
+			}
+		case xml.StartElement:
+			if reason := xmlStartViolation(element); reason != "" {
+				return reason, nil
+			}
+		}
+	}
+}
+
+func xmlStartViolation(element xml.StartElement) string {
+	tag := strings.ToLower(element.Name.Local)
+	if activeHTMLTags[tag] {
+		return "<" + tag + ">"
+	}
+	metaRefresh := false
+	inputType := ""
+	scriptType := ""
+	externalScript := false
+	for _, attribute := range element.Attr {
+		name := strings.ToLower(attribute.Name.Local)
+		value := strings.TrimSpace(strings.ToLower(attribute.Value))
+		if tag == "input" && name == "type" {
+			inputType = value
+		}
+		if tag == "script" && name == "type" {
+			scriptType = value
+		}
+		if tag == "script" && (name == "src" || name == "href") {
+			externalScript = true
+		}
+		if (name == "href" || name == "src" || name == "action" || name == "formaction") && strings.HasPrefix(value, "javascript:") {
+			return "a javascript: URL"
+		}
+		if name == "action" || name == "formaction" {
+			return name + " submission target"
+		}
+		if tag == "meta" && name == "http-equiv" && value == "refresh" {
+			metaRefresh = true
+		}
+	}
+	if metaRefresh {
+		return "a meta refresh"
+	}
+	if tag == "input" && !allowedInputTypes[inputType] {
+		if inputType == "" {
+			inputType = "text"
+		}
+		return fmt.Sprintf("<input type=%q>", inputType)
+	}
+	if tag == "script" {
+		if externalScript {
+			return "an external <script src>"
+		}
+		if !classicScriptType(scriptType) {
+			return fmt.Sprintf("<script type=%q>", scriptType)
+		}
+	}
+	return ""
 }
 
 func (s *Server) expiryFromForm(value string, defaultTTL time.Duration) (*time.Time, time.Duration, error) {

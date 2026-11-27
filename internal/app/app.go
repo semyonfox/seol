@@ -47,19 +47,28 @@ type Config struct {
 	DefaultExpiry     time.Duration
 	MaxExpiry         time.Duration
 	CleanupInterval   time.Duration
+	TelemetryEnabled  bool
+	TelemetryEndpoint string
 }
 
 func Version() string { return version }
 
 func ConfigFromEnv() (Config, error) {
 	c := Config{
-		ListenAddr:      env("SEOL_LISTEN_ADDR", ":8080"),
-		DataDir:         env("SEOL_DATA_DIR", "./data"),
-		PublicBaseURL:   strings.TrimRight(env("SEOL_PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
-		UploadToken:     os.Getenv("SEOL_TOKEN"),
-		CleanupInterval: defaultCleanupInterval,
+		ListenAddr:        env("SEOL_LISTEN_ADDR", ":8080"),
+		DataDir:           env("SEOL_DATA_DIR", "./data"),
+		PublicBaseURL:     strings.TrimRight(env("SEOL_PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
+		UploadToken:       os.Getenv("SEOL_TOKEN"),
+		CleanupInterval:   defaultCleanupInterval,
+		TelemetryEndpoint: os.Getenv("SEOL_TELEMETRY_ENDPOINT"),
 	}
 	var err error
+	if c.TelemetryEnabled, err = envBool("SEOL_TELEMETRY_ENABLED", false); err != nil {
+		return Config{}, err
+	}
+	if err := validateTelemetryConfig(c); err != nil {
+		return Config{}, err
+	}
 	if c.MaxUpload, err = envInt64("SEOL_MAX_UPLOAD_BYTES", defaultMaxUpload); err != nil {
 		return Config{}, err
 	}
@@ -161,6 +170,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.landingPage)
+	mux.HandleFunc("GET /landing.js", serveLandingScript)
 	mux.HandleFunc("GET /logo.svg", serveBrandAsset(assets.LogoSVG))
 	mux.HandleFunc("GET /favicon.svg", serveBrandAsset(assets.IconSVG))
 	mux.HandleFunc("GET /health", s.health)
@@ -212,6 +222,9 @@ func configWithDefaults(cfg Config) Config {
 }
 
 func validateConfig(cfg Config) error {
+	if err := validateTelemetryConfig(cfg); err != nil {
+		return err
+	}
 	if err := validateUploadLimits(cfg); err != nil {
 		return err
 	}

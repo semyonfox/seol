@@ -37,7 +37,7 @@ func TestLandingPage(t *testing.T) {
 		t.Fatalf("landing HEAD status=%d headers=%v", head.Code, head.Header())
 	}
 	body := recorder.Body.String()
-	for _, want := range []string{"Give this to your agent", "seol publish --quiet DIRECTORY", "https://pages.example.test"} {
+	for _, want := range []string{"Give this to your agent", "seol publish --quiet DIRECTORY", "https://pages.example.test", "download/seol_linux_x64", "Contained inline JavaScript"} {
 		if !bytes.Contains([]byte(body), []byte(want)) {
 			t.Fatalf("landing page missing %q", want)
 		}
@@ -787,7 +787,7 @@ func TestPDFUsesBrowserViewerAndMissingAssetExplainsFailure(t *testing.T) {
 	if got := resp.Header.Get("Content-Type"); !strings.Contains(got, "text/html") {
 		t.Fatalf("missing asset content type=%q", got)
 	}
-	if !bytes.Contains(body, []byte("This link is broken")) {
+	if !bytes.Contains(body, []byte("This page or file could not be found")) {
 		t.Fatalf("missing asset response=%q", body)
 	}
 }
