@@ -135,16 +135,16 @@ func (s *Server) updatePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	expiresAt, ttl, err := s.expiryFromForm(request.ExpiresIn, ttlDuration(current.TTLSeconds))
-	if err != nil || expiresAt == nil {
-		message := "Expiry must be between one hour and seven days."
-		if err != nil {
-			message = err.Error()
-		}
-		writeError(w, http.StatusBadRequest, "INVALID_EXPIRY", message)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_EXPIRY", err.Error())
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	updated, err := s.scanPage(s.db.QueryRowContext(r.Context(), `UPDATE pages SET updated_at=?,expires_at=?,ttl_seconds=? WHERE id=? AND status='active' RETURNING `+pageColumns, now, expiresAt.UTC().Format(time.RFC3339), ttlSeconds(ttl), id))
+	var expiry any
+	if expiresAt != nil {
+		expiry = expiresAt.UTC().Format(time.RFC3339)
+	}
+	updated, err := s.scanPage(s.db.QueryRowContext(r.Context(), `UPDATE pages SET updated_at=?,expires_at=?,ttl_seconds=? WHERE id=? AND status='active' RETURNING `+pageColumns, now, expiry, ttlSeconds(ttl), id))
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusConflict, "CONFLICT", "Page changed while updating expiry; retry.")
 		return
@@ -192,13 +192,27 @@ func (s *Server) servePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.Status == "expired" || isExpired(p.ExpiresAt) {
-		if p.Status == "active" {
-			if _, err := s.db.Exec(`UPDATE pages SET status='expired' WHERE id=?`, id); err == nil {
-				s.reclaimPageFiles(id)
-			}
+		if p.Status != "active" {
+			writeGonePage(w)
+			return
 		}
-		writeGonePage(w)
-		return
+		// A renewal can land after this read and before the write. Expire the
+		// row only when it still has the expiry we observed, and otherwise
+		// serve the page the publisher just extended.
+		if expireHookForTest != nil {
+			expireHookForTest()
+		}
+		if s.markExpired(id, p.ExpiresAt) {
+			s.reclaimPageFiles(id)
+			writeGonePage(w)
+			return
+		}
+		fresh, freshErr := s.getPageRecord(id)
+		if freshErr != nil || fresh.Status != "active" || isExpired(fresh.ExpiresAt) {
+			writeGonePage(w)
+			return
+		}
+		p = fresh
 	}
 	requestPath := r.PathValue("path")
 	if requestPath == "" {
@@ -260,13 +274,21 @@ func setArtifactCommonHeaders(w http.ResponseWriter) {
 // deliberately left without it, because the sandbox directive blocks the
 // browser's built-in viewer.
 func setArtifactContentPolicy(w http.ResponseWriter, contentType string) {
+	if activeDocumentType(contentType) {
+		w.Header().Set("Content-Security-Policy", artifactCSP)
+	}
+}
+
+func activeDocumentType(contentType string) bool {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		mediaType = contentType
 	}
 	switch mediaType {
 	case "text/html", "application/xhtml+xml", "image/svg+xml":
-		w.Header().Set("Content-Security-Policy", artifactCSP)
+		return true
+	default:
+		return false
 	}
 }
 
@@ -281,6 +303,37 @@ const feedbackPageStyle = `
     a { display:inline-flex; align-items:center; min-height:44px; padding:.5rem 0; color:#b84c20; text-underline-offset:.18em; }
     a:focus-visible { outline:3px solid #b84c20; outline-offset:4px; }
 `
+
+// activeDocumentExtension reports whether a file will be served as a document
+// the browser can run script in. The upload check has to use the same set as
+// the CSP, or an unsanitised SVG or XHTML file is published as an active page.
+func activeDocumentExtension(extension string) bool {
+	switch extension {
+	case ".html", ".htm", ".xhtml", ".xht", ".svg":
+		return true
+	default:
+		return activeDocumentType(mime.TypeByExtension(extension))
+	}
+}
+
+// expireHookForTest runs after servePage has observed an expiry and before it
+// records that expiry. Tests renew the page inside that window.
+var expireHookForTest func()
+
+// markExpired expires a page only when it still has the expiry that was read.
+// Zero rows means a newer write changed the page, so the caller must not
+// delete its files.
+func (s *Server) markExpired(id string, observed *string) bool {
+	if observed == nil {
+		return false
+	}
+	result, err := s.db.Exec(`UPDATE pages SET status='expired' WHERE id=? AND status='active' AND expires_at=?`, id, *observed)
+	if err != nil {
+		return false
+	}
+	rows, err := result.RowsAffected()
+	return err == nil && rows == 1
+}
 
 func writeNotFoundPage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
