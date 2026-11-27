@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -604,6 +605,187 @@ func TestConfiguredServerOverridesTheDefault(t *testing.T) {
 func TestBlankServerIsStillRejected(t *testing.T) {
 	if _, err := resolveServer("   "); err == nil {
 		t.Fatal("a blank --server must not fall through to a request against an empty host")
+	}
+}
+
+func TestRenewedPageSurvivesAStaleExpiryRead(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	p := uploadTestFile(t, web.URL, "page.html", []byte("<h1>still here</h1>"), "1h")
+	past := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	if _, err := s.db.Exec(`UPDATE pages SET expires_at=? WHERE id=?`, past, p.ID); err != nil {
+		t.Fatal(err)
+	}
+	expireHookForTest = func() {
+		future := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339)
+		if _, err := s.db.Exec(`UPDATE pages SET expires_at=? WHERE id=?`, future, p.ID); err != nil {
+			t.Errorf("renew: %v", err)
+		}
+	}
+	t.Cleanup(func() { expireHookForTest = nil })
+
+	resp, err := http.Get(web.URL + "/p/" + p.ID + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.StatusCode, body)
+	}
+	if string(body) != "<h1>still here</h1>" {
+		t.Fatalf("body = %q", body)
+	}
+	if _, err := os.Stat(filepath.Join(s.cfg.DataDir, "pages", p.ID, "v1", "index.html")); err != nil {
+		t.Fatalf("renewed page files were removed: %v", err)
+	}
+	var status string
+	if err := s.db.QueryRow(`SELECT status FROM pages WHERE id=?`, p.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		t.Fatalf("status = %s, want active", status)
+	}
+}
+
+func TestCleanupLogOmitsPageIDWhenRemovalFails(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	p := uploadTestFile(t, web.URL, "page.html", []byte("<h1>secret</h1>"), "")
+	pagesDir := filepath.Join(s.cfg.DataDir, "pages")
+	if err := os.Chmod(pagesDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(pagesDir, 0o750) })
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	s.reclaimPageFiles(p.ID)
+	if _, err := os.Stat(filepath.Join(pagesDir, p.ID)); err != nil {
+		t.Fatalf("page directory should remain when removal fails: %v", err)
+	}
+	if strings.Contains(logs.String(), p.ID) {
+		t.Fatalf("cleanup log leaked page ID %s:\n%s", p.ID, logs.String())
+	}
+	if !strings.Contains(logs.String(), "clean up page files") {
+		t.Fatalf("expected a cleanup error, got %q", logs.String())
+	}
+}
+
+func TestPatchNeverWhenMaximumIsUnlimited(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", MaxExpiry: expiryUnlimited})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	p := uploadTestFile(t, web.URL, "page.html", []byte("<h1>hello</h1>"), "1h")
+	req, err := http.NewRequest(http.MethodPatch, web.URL+"/api/v1/pages/"+p.ID, strings.NewReader(`{"expires_in":"never"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body = %s", resp.StatusCode, body)
+	}
+	var updated page
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.ExpiresAt != nil {
+		t.Fatalf("expires_at = %v, want null", *updated.ExpiresAt)
+	}
+	if updated.TTLSeconds >= 0 {
+		t.Fatalf("ttl_seconds = %d, want a negative unlimited marker", updated.TTLSeconds)
+	}
+}
+
+func TestRejectsActiveMarkupOutsideHTML(t *testing.T) {
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", UploadsPerMinute: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeTestServer(t, s)
+	web := httptest.NewServer(s.httpServer.Handler)
+	defer web.Close()
+
+	cases := map[string]map[string]string{
+		"xhtml iframe": {
+			"index.html": `<h1>ok</h1>`,
+			"page.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><iframe src="https://example.com"></iframe></html>`,
+		},
+		"svg external script": {
+			"index.html":  `<h1>ok</h1>`,
+			"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg"><script src="https://example.com/x.js"></script></svg>`,
+		},
+		"xml form": {
+			"index.html": `<h1>ok</h1>`,
+			"note.xml":   `<html xmlns="http://www.w3.org/1999/xhtml"><form action="https://evil.test"><input type="password"/></form></html>`,
+		},
+		"prefixed form": {
+			"index.html":  `<h1>ok</h1>`,
+			"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml"><h:form><h:input type="password"/></h:form></svg>`,
+		},
+		"xml raw text": {
+			"index.html": `<h1>ok</h1>`,
+			"page.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><plaintext><form><input type="password"/></form></plaintext></html>`,
+		},
+		"doctype entity": {
+			"index.html": `<h1>ok</h1>`,
+			"page.xhtml": `<!DOCTYPE html [<!ENTITY f "<input type='password'/>">]><html xmlns="http://www.w3.org/1999/xhtml">&f;</html>`,
+		},
+	}
+	for name, files := range cases {
+		t.Run(name, func(t *testing.T) {
+			resp := rawUpload(t, web.URL, "site.zip", zipBytes(t, files), "")
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("status = %d body = %s", resp.StatusCode, body)
+			}
+		})
+	}
+
+	plain := zipBytes(t, map[string]string{
+		"index.html":  `<h1>ok</h1>`,
+		"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg"><script type="text/ecmascript">/* local */</script></svg>`,
+		"note.xml":    `<html xmlns="http://www.w3.org/1999/xhtml"><script>bad()</script></html>`,
+	})
+	created := uploadTestFile(t, web.URL, "site.zip", plain, "")
+	resp, err := http.Get(web.URL + "/p/" + created.ID + "/note.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("xml status = %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Content-Security-Policy") == "" {
+		t.Fatal("xml response missing content security policy")
 	}
 }
 
