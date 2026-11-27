@@ -173,11 +173,13 @@ func (s *Server) cleanupExpired() {
 // failure leaves the flag unset so the next sweep retries.
 func (s *Server) reclaimPageFiles(id string) {
 	if err := removePageFiles(s.cfg.DataDir, id); err != nil {
-		slog.Error("clean up page files", "page_id", id, "error", err)
+		// The filesystem error includes the page directory. That path is the
+		// capability for the page, so it cannot be written to the log.
+		slog.Error("clean up page files", "error", strings.ReplaceAll(err.Error(), id, redactedID))
 		return
 	}
 	if _, err := s.db.Exec(`UPDATE pages SET files_removed = 1 WHERE id = ?`, id); err != nil {
-		slog.Error("record page file removal", "page_id", id, "error", err)
+		slog.Error("record page file removal", "error", strings.ReplaceAll(err.Error(), id, redactedID))
 	}
 }
 
