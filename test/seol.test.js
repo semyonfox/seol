@@ -79,6 +79,21 @@ test("get rejects a GitHub redirect onto another host", async () => {
   );
 });
 
+test("get rejects a redirect to raw.githubusercontent.com", async () => {
+  const client = {
+    get(_url, _options, callback) {
+      const stream = response(302, { location: "https://raw.githubusercontent.com/someone/repo/main/seol" });
+      process.nextTick(() => callback(stream));
+      return request();
+    },
+  };
+
+  await assert.rejects(
+    get("https://github.com/semyonfox/seol/releases/download/v1/seol", client),
+    new Error("download redirect is not allowed"),
+  );
+});
+
 test("get follows a GitHub release redirect to githubusercontent", async () => {
   const urls = [];
   const client = {

@@ -34,7 +34,8 @@ function fail(message) {
 function isGitHubReleaseHost(hostname) {
   return hostname === "github.com" ||
     hostname === "www.github.com" ||
-    hostname.endsWith(".githubusercontent.com");
+    hostname === "objects.githubusercontent.com" ||
+    hostname === "release-assets.githubusercontent.com";
 }
 
 // redirectAllowed keeps a GitHub release download on GitHub's hosts. The

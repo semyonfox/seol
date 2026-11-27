@@ -269,27 +269,23 @@ func setArtifactCommonHeaders(w http.ResponseWriter) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 }
 
-// setArtifactContentPolicy applies the artifact CSP only to types the browser
-// renders as an active document. A passive type such as application/pdf is
-// deliberately left without it, because the sandbox directive blocks the
-// browser's built-in viewer.
+// setArtifactContentPolicy puts the sandbox CSP on every artifact except PDF.
+// The sandbox directive blocks the browser's built-in PDF viewer. Every other
+// type gets it, including XML, so a document the browser will render cannot
+// run script on the server origin.
 func setArtifactContentPolicy(w http.ResponseWriter, contentType string) {
-	if activeDocumentType(contentType) {
-		w.Header().Set("Content-Security-Policy", artifactCSP)
+	if pdfContentType(contentType) {
+		return
 	}
+	w.Header().Set("Content-Security-Policy", artifactCSP)
 }
 
-func activeDocumentType(contentType string) bool {
+func pdfContentType(contentType string) bool {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		mediaType = contentType
 	}
-	switch mediaType {
-	case "text/html", "application/xhtml+xml", "image/svg+xml":
-		return true
-	default:
-		return false
-	}
+	return mediaType == "application/pdf"
 }
 
 const feedbackPageStyle = `
@@ -303,18 +299,6 @@ const feedbackPageStyle = `
     a { display:inline-flex; align-items:center; min-height:44px; padding:.5rem 0; color:#b84c20; text-underline-offset:.18em; }
     a:focus-visible { outline:3px solid #b84c20; outline-offset:4px; }
 `
-
-// activeDocumentExtension reports whether a file will be served as a document
-// the browser can run script in. The upload check has to use the same set as
-// the CSP, or an unsanitised SVG or XHTML file is published as an active page.
-func activeDocumentExtension(extension string) bool {
-	switch extension {
-	case ".html", ".htm", ".xhtml", ".xht", ".svg":
-		return true
-	default:
-		return activeDocumentType(mime.TypeByExtension(extension))
-	}
-}
 
 // expireHookForTest runs after servePage has observed an expiry and before it
 // records that expiry. Tests renew the page inside that window.
