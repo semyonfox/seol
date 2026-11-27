@@ -64,6 +64,66 @@ test("get follows HTTPS redirects", async () => {
   assert.equal(resumed, true);
 });
 
+test("get rejects a GitHub redirect onto another host", async () => {
+  const client = {
+    get(_url, _options, callback) {
+      const stream = response(302, { location: "https://evil.test/seol" });
+      process.nextTick(() => callback(stream));
+      return request();
+    },
+  };
+
+  await assert.rejects(
+    get("https://github.com/semyonfox/seol/releases/download/v1/seol", client),
+    new Error("download redirect is not allowed"),
+  );
+});
+
+test("get follows a GitHub release redirect to githubusercontent", async () => {
+  const urls = [];
+  const client = {
+    get(url, _options, callback) {
+      urls.push(url);
+      const result = request();
+      process.nextTick(() => {
+        if (urls.length === 1) {
+          callback(response(302, { location: "https://objects.githubusercontent.com/seol" }));
+          return;
+        }
+        const stream = response(200);
+        callback(stream);
+        stream.emit("data", Buffer.from("binary"));
+        stream.emit("end");
+      });
+      return result;
+    },
+  };
+
+  assert.deepEqual(
+    await get("https://github.com/semyonfox/seol/releases/download/v1/seol", client),
+    Buffer.from("binary"),
+  );
+  assert.deepEqual(urls, [
+    "https://github.com/semyonfox/seol/releases/download/v1/seol",
+    "https://objects.githubusercontent.com/seol",
+  ]);
+});
+
+test("get rejects an HTTP downgrade", async () => {
+  const client = {
+    get(_url, _options, callback) {
+      const stream = response(302, { location: "http://github.com/seol" });
+      process.nextTick(() => callback(stream));
+      return request();
+    },
+  };
+
+  await assert.rejects(
+    get("https://github.com/semyonfox/seol/releases/download/v1/seol", client),
+    new Error("download redirect is not allowed"),
+  );
+});
+
 test("get rejects redirect loops", async () => {
   const client = {
     get(_url, _options, callback) {

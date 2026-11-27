@@ -31,6 +31,27 @@ function fail(message) {
   process.exit(1);
 }
 
+function isGitHubReleaseHost(hostname) {
+  return hostname === "github.com" ||
+    hostname === "www.github.com" ||
+    hostname.endsWith(".githubusercontent.com");
+}
+
+// redirectAllowed keeps a GitHub release download on GitHub's hosts. The
+// checksum is fetched the same way as the binary, so a redirect of both to
+// another host would make a substituted binary verify. Other hosts may only
+// redirect to themselves.
+function redirectAllowed(currentURL, nextURL) {
+  if (nextURL.protocol !== "https:") {
+    return false;
+  }
+  const current = new URL(currentURL);
+  if (isGitHubReleaseHost(current.hostname)) {
+    return isGitHubReleaseHost(nextURL.hostname);
+  }
+  return nextURL.hostname === current.hostname;
+}
+
 function get(url, client = https, redirects = 0) {
   return new Promise((resolve, reject) => {
     const request = client.get(url, { headers: { "User-Agent": "seol-npm-cli" } }, (response) => {
@@ -40,7 +61,18 @@ function get(url, client = https, redirects = 0) {
           reject(new Error("download exceeded redirect limit"));
           return;
         }
-        resolve(get(new URL(response.headers.location, url).toString(), client, redirects + 1));
+        let nextURL;
+        try {
+          nextURL = new URL(response.headers.location, url);
+        } catch {
+          reject(new Error("download redirect is not a valid URL"));
+          return;
+        }
+        if (!redirectAllowed(url, nextURL)) {
+          reject(new Error("download redirect is not allowed"));
+          return;
+        }
+        resolve(get(nextURL.toString(), client, redirects + 1));
         return;
       }
       if (response.statusCode !== 200) {
