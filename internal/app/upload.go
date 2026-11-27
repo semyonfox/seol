@@ -77,10 +77,6 @@ func (s *Server) replacePage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "NOT_FOUND", "Active page not found.")
 		return
 	}
-	if err != nil {
-		writeError(w, 500, "INTERNAL", "Could not read page.")
-		return
-	}
 	ttl := ttlDuration(current.TTLSeconds)
 	upload, title, _, requestedTTL, err := s.receiveUpload(w, r, ttl)
 	if err != nil {
@@ -336,8 +332,7 @@ func validatePassiveHTMLTree(root string) error {
 		if entry.IsDir() {
 			return nil
 		}
-		extension := strings.ToLower(filepath.Ext(entry.Name()))
-		if extension != ".html" && extension != ".htm" {
+		if !activeDocumentExtension(strings.ToLower(filepath.Ext(entry.Name()))) {
 			return nil
 		}
 		if reason, err := passiveHTMLViolation(path); err != nil {
